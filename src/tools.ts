@@ -32,6 +32,70 @@ const querySchema = z.string().trim().min(1).max(2_000);
 const limitSchema = z.number().int().min(1).max(20).default(10);
 const matchSchema = z.enum(["and", "or"]).default("and");
 
+const getPageOutputSchema = z.object({
+  exists: z.boolean(),
+  title: z.string(),
+  canonicalUrl: z.string(),
+  pageId: z.string().optional(),
+  commitId: z.string().optional(),
+  text: z.string().optional(),
+  createdAt: z.string().optional(),
+  updatedAt: z.string().optional(),
+  pageRank: z.number().optional(),
+  linked: z.number().optional(),
+  links: z.array(z.string()).optional(),
+});
+
+const fullTextSearchOutputSchema = z.object({
+  reportedCount: z.number().optional(),
+  exactTitleMatch: z.boolean().optional(),
+  returned: z.number(),
+  truncated: z.boolean(),
+  results: z.array(
+    z.object({
+      title: z.string(),
+      snippet: z.string(),
+      matchedWords: z.array(z.string()),
+      updatedAt: z.string().optional(),
+      pageRank: z.number().optional(),
+      canonicalUrl: z.string(),
+    }),
+  ),
+});
+
+const vectorSearchOutputSchema = z.object({
+  returned: z.number(),
+  localTruncated: z.boolean(),
+  results: z.array(
+    z.object({
+      title: z.string(),
+      score: z.number(),
+      exists: z.boolean(),
+      canonicalUrl: z.string(),
+      updatedAt: z.string().optional(),
+      pageRank: z.number().optional(),
+    }),
+  ),
+});
+
+const relatedPagesOutputSchema = z.object({
+  total: z.number().optional(),
+  hasNext: z.boolean(),
+  nextCursor: z.string().optional(),
+  returned: z.number(),
+  results: z.array(
+    z.object({
+      title: z.string(),
+      descriptions: z.array(z.string()),
+      relation: z.enum(["outgoing", "incoming", "bidirectional"]).optional(),
+      pageRank: z.number().optional(),
+      linked: z.number().optional(),
+      updatedAt: z.string().optional(),
+      canonicalUrl: z.string(),
+    }),
+  ),
+});
+
 function requireReadAccess(
   context: ServerContext,
   requestContext: McpRequestContext,
@@ -96,9 +160,11 @@ export function createCosenseMcpServer(
   server.registerTool(
     "get_page",
     {
+      title: "Get Cosense page",
       description:
         "Read one page from the fixed public Cosense project. Returns the page body without author data or line IDs.",
       inputSchema: z.object({ title: titleSchema }),
+      outputSchema: getPageOutputSchema,
       annotations,
     },
     async ({ title }, context) => {
@@ -120,14 +186,16 @@ export function createCosenseMcpServer(
   server.registerTool(
     "search_full_text",
     {
+      title: "Search Cosense text",
       description:
-        "Search page bodies in the fixed public Cosense project. Use this when the requested words may appear in ordinary body text.",
+        "Find indexed candidate snippets by words in ordinary page text. Results may lag edits and are not complete page bodies; call get_page for the selected title to read the current body.",
       inputSchema: z.object({
         query: querySchema,
         match: matchSchema,
         sort: z.enum(["pageRank", "updated"]).default("pageRank"),
         limit: limitSchema,
       }),
+      outputSchema: fullTextSearchOutputSchema,
       annotations,
     },
     async (input, context) => {
@@ -144,12 +212,14 @@ export function createCosenseMcpServer(
   server.registerTool(
     "search_vector",
     {
+      title: "Search Cosense semantically",
       description:
-        "Semantic search over Cosense page titles and inline link notation. Ordinary body text is not searched; score values are only relative ranking signals.",
+        "Find indexed semantic candidates from Cosense page titles and inline link notation. Ordinary body text is not searched, results may lag edits, and scores are relative; call get_page for a selected existing title.",
       inputSchema: z.object({
         query: querySchema,
         limit: limitSchema,
       }),
+      outputSchema: vectorSearchOutputSchema,
       annotations,
     },
     async (input, context) => {
@@ -166,8 +236,9 @@ export function createCosenseMcpServer(
   server.registerTool(
     "get_related_pages",
     {
+      title: "Get related Cosense pages",
       description:
-        "List 1-hop or 2-hop related pages from the fixed public Cosense project. Returns metadata and pagination, not page bodies.",
+        "List 1-hop or 2-hop candidate pages from the fixed public Cosense project. Returns metadata and pagination, not current page bodies; call get_page for selected titles.",
       inputSchema: z.object({
         title: titleSchema,
         hop: z.union([z.literal(1), z.literal(2)]).default(1),
@@ -176,6 +247,7 @@ export function createCosenseMcpServer(
         limit: limitSchema,
         cursor: z.string().min(1).max(2_000).optional(),
       }),
+      outputSchema: relatedPagesOutputSchema,
       annotations,
     },
     async (input, context) => {

@@ -132,8 +132,14 @@ describe("createCosenseMcpServer", () => {
       resultType: string;
       tools: Array<{
         annotations?: Record<string, unknown>;
+        description?: string;
         inputSchema: { properties?: Record<string, unknown> };
         name: string;
+        outputSchema?: {
+          properties?: Record<string, unknown>;
+          type?: string;
+        };
+        title?: string;
       }>;
       ttlMs: number;
     };
@@ -156,6 +162,42 @@ describe("createCosenseMcpServer", () => {
       search_vector: ["limit", "query"],
       get_related_pages: ["cursor", "hop", "limit", "match", "query", "title"],
     };
+    const expectedOutputProperties = {
+      get_page: [
+        "canonicalUrl",
+        "commitId",
+        "createdAt",
+        "exists",
+        "linked",
+        "links",
+        "pageId",
+        "pageRank",
+        "text",
+        "title",
+        "updatedAt",
+      ],
+      search_full_text: [
+        "exactTitleMatch",
+        "reportedCount",
+        "results",
+        "returned",
+        "truncated",
+      ],
+      search_vector: ["localTruncated", "results", "returned"],
+      get_related_pages: [
+        "hasNext",
+        "nextCursor",
+        "results",
+        "returned",
+        "total",
+      ],
+    };
+    const expectedTitles = {
+      get_page: "Get Cosense page",
+      search_full_text: "Search Cosense text",
+      search_vector: "Search Cosense semantically",
+      get_related_pages: "Get related Cosense pages",
+    };
 
     for (const tool of result.tools) {
       expect(tool.annotations).toMatchObject({
@@ -165,6 +207,18 @@ describe("createCosenseMcpServer", () => {
       expect(Object.keys(tool.inputSchema.properties ?? {}).sort()).toEqual(
         expectedProperties[tool.name as keyof typeof expectedProperties],
       );
+      expect(tool.title).toBe(
+        expectedTitles[tool.name as keyof typeof expectedTitles],
+      );
+      expect(tool.outputSchema?.type).toBe("object");
+      expect(Object.keys(tool.outputSchema?.properties ?? {}).sort()).toEqual(
+        expectedOutputProperties[
+          tool.name as keyof typeof expectedOutputProperties
+        ],
+      );
+      if (tool.name !== "get_page") {
+        expect(tool.description).toContain("get_page");
+      }
     }
   });
 

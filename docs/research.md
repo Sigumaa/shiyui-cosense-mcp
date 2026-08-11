@@ -377,7 +377,7 @@ projectはsource定数 `shiyui` とし、tool引数にprojectやURLを持たせ�
 
 ### MCP resultの形
 
-各toolは、短い `content` と機械可読な `structuredContent` の両方を返す。巨大なraw JSONや同じ本文の重複は避ける。現在のMCP tool call resultは `resultType: "complete"` を要求する。`tools/list` には `resultType: "complete"`、`ttlMs: 0`、`cacheScope: "private"` を設定し、認証された一人用tool metadataをprotocol上もcacheしない。SDKが実際にこの形を出すことをcontract testで確認する。[MCP tools](https://modelcontextprotocol.io/specification/2026-07-28/server/tools) [OpenAI MCP build guide](https://developers.openai.com/plugins/build/mcp-server)
+各toolは、人間向けの `title`、機械可読な `outputSchema`、短い `content`、`structuredContent` を返す。巨大なraw JSONや同じ本文の重複は避ける。現在のMCP tool call resultは `resultType: "complete"` を要求する。`tools/list` には `resultType: "complete"`、`ttlMs: 0`、`cacheScope: "private"` を設定し、認証された一人用tool metadataをprotocol上もcacheしない。SDKが実際にこの形を出すことをcontract testで確認する。[MCP tools](https://modelcontextprotocol.io/specification/2026-07-28/server/tools) [OpenAI MCP build guide](https://developers.openai.com/plugins/build/mcp-server)
 
 ## v1へ採用しない機能
 
@@ -450,7 +450,7 @@ OpenAIのtool-level OAuth linking UIは各toolの `securitySchemes` も要求す
 - `ACCESS_CLIENT_ID`、`ACCESS_CLIENT_SECRET`、authorization/token/JWKS URL、`COOKIE_ENCRYPTION_KEY` が必要。
 - 設定項目は多いが、identity policyの責務が明確で、長期保守に向く。
 
-AccessはMCPのOAuth serverそのものではなく、Workerの `/authorize` が使うupstream IdPである。Workerは最初に `parseAuthRequest` でMCP client、redirect URI、resource、scopeを検証する。Access-for-SaaSへredirectし、専用 `/callback` でcodeをexchangeし、JWKSを使ってissuer、audience、expiry、nonce、state / CSRFを検証する。その後、一人用policyで確認したidentityと検証済みclient / scopeを表示する明示的な同意画面を挟み、同意POST自体もCSRF保護してから `completeAuthorization` を呼ぶ。これは一人用でもconfused-deputy対策として省略しない。ChatGPTがMCP OAuthへ戻るcallbackと、AccessからWorkerへ戻るupstream callbackは別URLである。
+AccessはMCPのOAuth serverそのものではなく、Workerの `/authorize` が使うupstream IdPである。Workerは最初に `parseAuthRequest` でMCP client、redirect URI、resource、scopeを検証し、現行MCP profileに合わせてredirect URIをHTTPSまたはloopbackに限定し、PKCE S256を必須にする。Access-for-SaaSへredirectし、専用 `/callback` でcodeをexchangeし、JWKSを使ってissuer、audience、expiry、issued-at、authorized party、nonce、state / CSRFを検証する。その後、一人用policyで確認したidentityと検証済みclient / scopeを表示する明示的な同意画面を挟み、同意POST自体もCSRF保護してから `completeAuthorization` を呼ぶ。これは一人用でもconfused-deputy対策として省略しない。ChatGPTがMCP OAuthへ戻るcallbackと、AccessからWorkerへ戻るupstream callbackは別URLである。
 
 Access policyだけを変更しても、すでに `OAUTH_KV` に発行済みのMCP grant / refresh tokenは即時失効しない。実装は各requestとtoken更新時に現在の `ALLOWED_EMAIL` を再検査する。全grantを失効する場合は、新しい空のKV namespaceへbindingを切り替える。
 

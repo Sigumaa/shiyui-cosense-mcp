@@ -2,7 +2,10 @@ import { env, exports } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { hasCurrentReadAuthorizationProps, type Env } from "../src/env";
-import worker, { synchronizeAccessTokenProps } from "../src/index";
+import worker, {
+  mcpApiHandler,
+  synchronizeAccessTokenProps,
+} from "../src/index";
 
 const mcpUrl = "https://mcp.example.com/mcp";
 const workerBinding = (exports as unknown as { default: Fetcher }).default;
@@ -147,6 +150,54 @@ describe("OAuth-protected MCP Worker", () => {
         "allowed@example.com",
       ),
     ).toThrow("The authorized account is no longer allowed");
+  });
+
+  it("returns protected-resource guidance for insufficient scope", async () => {
+    const response = await mcpApiHandler.fetch(
+      new Request(mcpUrl, { method: "POST" }),
+      env as unknown as Env,
+      {
+        props: {
+          sub: "access-user",
+          email: "allowed@example.com",
+          scopes: [],
+        },
+      } as ExecutionContext & { props: unknown },
+    );
+
+    expect(response.status).toBe(403);
+    expectNoStore(response);
+    const challenge = response.headers.get("WWW-Authenticate") ?? "";
+    expect(challenge).toContain('Bearer realm="OAuth"');
+    expect(challenge).toContain('error="insufficient_scope"');
+    expect(challenge).toContain('scope="cosense:read"');
+    expect(challenge).toContain(
+      'resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp"',
+    );
+  });
+
+  it("returns invalid_token when the current allowed email revokes a grant", async () => {
+    const response = await mcpApiHandler.fetch(
+      new Request(mcpUrl, { method: "POST" }),
+      env as unknown as Env,
+      {
+        props: {
+          sub: "access-user",
+          email: "previous@example.com",
+          scopes: ["cosense:read"],
+        },
+      } as ExecutionContext & { props: unknown },
+    );
+
+    expect(response.status).toBe(401);
+    expectNoStore(response);
+    const challenge = response.headers.get("WWW-Authenticate") ?? "";
+    expect(challenge).toContain('Bearer realm="OAuth"');
+    expect(challenge).toContain('error="invalid_token"');
+    expect(challenge).not.toContain('scope="cosense:read"');
+    expect(challenge).toContain(
+      'resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp"',
+    );
   });
 
   it("returns a detail-free server error for an invalid MCP_SERVER_URL", async () => {

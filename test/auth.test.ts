@@ -85,7 +85,7 @@ function createFlowFixture(scope: string[] = [READ_SCOPE]): FlowFixture {
     redirectUri: CLIENT_CALLBACK_URL,
     scope,
     state: "client-state",
-    codeChallenge: "client-code-challenge",
+    codeChallenge: "A".repeat(43),
     codeChallengeMethod: "S256",
     issuer: "https://mcp.example.com",
   };
@@ -237,20 +237,40 @@ async function authorize(
   };
 }
 
-async function idToken(email: string, nonce: string): Promise<string> {
-  return new SignJWT({ email, nonce, name: "Allowed User" })
+interface IdTokenOptions {
+  audience?: string | string[];
+  authorizedParty?: string;
+  includeIssuedAt?: boolean;
+  nonceClaim?: string;
+}
+
+async function idToken(
+  email: string,
+  nonce: string,
+  options: IdTokenOptions = {},
+): Promise<string> {
+  let token = new SignJWT({
+    email,
+    nonce: options.nonceClaim ?? nonce,
+    name: "Allowed User",
+    ...(options.authorizedParty === undefined
+      ? {}
+      : { azp: options.authorizedParty }),
+  })
     .setProtectedHeader({ alg: "RS256", kid: KEY_ID })
     .setIssuer(ACCESS_ISSUER)
-    .setAudience(ACCESS_CLIENT_ID)
-    .setSubject(ACCESS_SUBJECT)
-    .setIssuedAt()
-    .setExpirationTime("5m")
-    .sign(signingKey);
+    .setAudience(options.audience ?? ACCESS_CLIENT_ID)
+    .setSubject(ACCESS_SUBJECT);
+  if (options.includeIssuedAt !== false) {
+    token = token.setIssuedAt();
+  }
+  return token.setExpirationTime("5m").sign(signingKey);
 }
 
 async function callback(
   fixture: FlowFixture,
-  email = ALLOWED_EMAIL,
+  createToken: (nonce: string) => Promise<string> = (nonce) =>
+    idToken(ALLOWED_EMAIL, nonce),
 ): Promise<{
   handler: ExportedHandler<Env>;
   upstream: ReturnType<typeof createUpstreamFetch>;
@@ -261,7 +281,7 @@ async function callback(
   const upstream = createUpstreamFetch();
   const handler = createAuthorizationHandler(upstream.fetcher);
   const authorization = await authorize(fixture, handler);
-  const token = await idToken(email, authorization.stored.nonce);
+  const token = await createToken(authorization.stored.nonce);
   upstream.setIdToken(token);
   vi.stubGlobal("fetch", upstream.fetcher);
   const response = await dispatch(
@@ -339,6 +359,9 @@ describe("authorization flow", () => {
     expect(result.stored.codeVerifier).toMatch(/^[A-Za-z0-9_-]{43}$/u);
     expect(result.stored.browserNonce).toMatch(/^[A-Za-z0-9_-]{43}$/u);
     expect(result.stored.nonce).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+    expect(result.accessUrl.searchParams.get("code_challenge")).toMatch(
+      /^[A-Za-z0-9]/u,
+    );
     expect(result.response.headers.get("Set-Cookie")).toContain(
       `__Host-cosense_mcp_flow=${result.stored.browserNonce}`,
     );
@@ -367,6 +390,74 @@ describe("authorization flow", () => {
     expect(fixture.completeAuthorization).not.toHaveBeenCalled();
     expect(fixture.entries.size).toBe(0);
     expect(upstream.calls).toHaveLength(0);
+  });
+
+  it.each([
+    "http://client.example/callback",
+    "custom-scheme://client/callback",
+    "https://client.example/callback#fragment",
+  ])("rejects an unsafe MCP redirect URI: %s", async (redirectUri) => {
+    const fixture = createFlowFixture();
+    fixture.oauthRequest.redirectUri = redirectUri;
+    const upstream = createUpstreamFetch();
+    const response = await dispatch(
+      createAuthorizationHandler(upstream.fetcher),
+      new Request("https://mcp.example.com/authorize"),
+      fixture.env,
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.text()).resolves.toBe("Invalid OAuth redirect URI");
+    expect(response.headers.get("Location")).toBeNull();
+    expect(fixture.lookupClient).not.toHaveBeenCalled();
+    expect(fixture.entries.size).toBe(0);
+    expect(upstream.calls).toHaveLength(0);
+  });
+
+  it("requires an MCP client to use PKCE S256", async () => {
+    const fixture = createFlowFixture();
+    fixture.oauthRequest.codeChallengeMethod = "plain";
+    const upstream = createUpstreamFetch();
+    const response = await dispatch(
+      createAuthorizationHandler(upstream.fetcher),
+      new Request("https://mcp.example.com/authorize"),
+      fixture.env,
+    );
+    const redirect = new URL(response.headers.get("Location") ?? "");
+
+    expect(response.status).toBe(302);
+    expect(redirect.origin + redirect.pathname).toBe(CLIENT_CALLBACK_URL);
+    expect(Object.fromEntries(redirect.searchParams)).toEqual({
+      error: "invalid_request",
+      error_description: "PKCE S256 is required",
+      state: fixture.oauthRequest.state,
+      iss: fixture.oauthRequest.issuer,
+    });
+    expect(fixture.lookupClient).not.toHaveBeenCalled();
+    expect(fixture.entries.size).toBe(0);
+    expect(upstream.calls).toHaveLength(0);
+  });
+
+  it.each([
+    "http://localhost:8400/callback",
+    "http://127.0.0.2:8400/callback",
+    "http://[::1]:8400/callback",
+  ])("allows an MCP loopback redirect URI: %s", async (redirectUri) => {
+    const fixture = createFlowFixture();
+    fixture.oauthRequest.redirectUri = redirectUri;
+    const upstream = createUpstreamFetch();
+    const response = await dispatch(
+      createAuthorizationHandler(upstream.fetcher),
+      new Request("https://mcp.example.com/authorize"),
+      fixture.env,
+    );
+
+    expect(response.status).toBe(302);
+    expect(new URL(response.headers.get("Location") ?? "").origin).toBe(
+      new URL(ACCESS_AUTHORIZATION_URL).origin,
+    );
+    expect(fixture.lookupClient).toHaveBeenCalledOnce();
+    expect(fixture.entries.size).toBe(1);
   });
 
   it("verifies the callback identity and approves only cosense:read without retaining Access tokens", async () => {
@@ -416,6 +507,7 @@ describe("authorization flow", () => {
     ]);
     const tokenCall = flow.upstream.calls[0];
     expect(tokenCall?.init?.method).toBe("POST");
+    expect(tokenCall?.init?.redirect).toBe("error");
     const tokenBody = new URLSearchParams(String(tokenCall?.init?.body));
     expect(Object.fromEntries(tokenBody)).toEqual({
       client_id: ACCESS_CLIENT_ID,
@@ -473,7 +565,9 @@ describe("authorization flow", () => {
 
   it("rejects the wrong email and consumes callback state", async () => {
     const fixture = createFlowFixture();
-    const flow = await callback(fixture, "other@example.com");
+    const flow = await callback(fixture, (nonce) =>
+      idToken("other@example.com", nonce),
+    );
 
     expect(flow.response.status).toBe(403);
     await expect(flow.response.text()).resolves.toBe(
@@ -494,6 +588,74 @@ describe("authorization flow", () => {
       "OAuth state is invalid or expired",
     );
     expect(flow.upstream.calls).toHaveLength(2);
+  });
+
+  it.each([
+    {
+      name: "missing iat",
+      options: { includeIssuedAt: false },
+    },
+    {
+      name: "multiple audiences",
+      options: { audience: [ACCESS_CLIENT_ID, "other-audience"] },
+    },
+    {
+      name: "a mismatched azp",
+      options: { authorizedParty: "other-client" },
+    },
+    {
+      name: "a mismatched nonce",
+      options: { nonceClaim: "different-nonce" },
+    },
+  ])("rejects a signed ID token with $name", async ({ options }) => {
+    const fixture = createFlowFixture();
+    const flow = await callback(fixture, (nonce) =>
+      idToken(ALLOWED_EMAIL, nonce, options),
+    );
+
+    expect(flow.response.status).toBe(403);
+    await expect(flow.response.text()).resolves.toBe(
+      options.nonceClaim
+        ? "Cloudflare Access nonce verification failed"
+        : "Cloudflare Access identity verification failed",
+    );
+    expect(fixture.entries.size).toBe(0);
+    expect(fixture.completeAuthorization).not.toHaveBeenCalled();
+  });
+
+  it("accepts a multiple-audience ID token when azp identifies this client", async () => {
+    const fixture = createFlowFixture();
+    const flow = await callback(fixture, (nonce) =>
+      idToken(ALLOWED_EMAIL, nonce, {
+        audience: [ACCESS_CLIENT_ID, "other-audience"],
+        authorizedParty: ACCESS_CLIENT_ID,
+      }),
+    );
+
+    expect(flow.response.status).toBe(200);
+    expect(await flow.response.text()).toContain("Test MCP Client");
+    expect(fixture.completeAuthorization).not.toHaveBeenCalled();
+    expect(fixture.entries.size).toBe(1);
+  });
+
+  it("rejects a callback without a code and consumes its state", async () => {
+    const fixture = createFlowFixture();
+    const upstream = createUpstreamFetch();
+    const handler = createAuthorizationHandler(upstream.fetcher);
+    const authorization = await authorize(fixture, handler);
+    const response = await dispatch(
+      handler,
+      new Request(
+        `https://mcp.example.com/callback?state=${encodeURIComponent(authorization.state)}`,
+        { headers: { Cookie: authorization.cookie } },
+      ),
+      fixture.env,
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.text()).resolves.toBe("Missing authorization code");
+    expect(fixture.entries.size).toBe(0);
+    expect(upstream.calls).toHaveLength(0);
   });
 
   it("rejects a callback that is not bound to the browser that started the flow", async () => {
@@ -543,6 +705,37 @@ describe("authorization flow", () => {
     });
     expect(response.headers.get("Set-Cookie")).toContain("Max-Age=0");
     expect(fixture.completeAuthorization).not.toHaveBeenCalled();
+    expect(fixture.entries.size).toBe(0);
+  });
+
+  it("rejects a mismatched consent CSRF token without consuming valid consent", async () => {
+    const fixture = createFlowFixture();
+    const flow = await callback(fixture);
+    const html = await flow.response.text();
+    const state = hiddenValue(html, "state");
+    const csrf = hiddenValue(html, "csrf");
+    const cookie = cookiePair(flow.response);
+
+    const rejected = await dispatch(
+      flow.handler,
+      consentRequest(state, "wrong-csrf", cookie, "approve"),
+      fixture.env,
+    );
+
+    expect(rejected.status).toBe(400);
+    await expect(rejected.text()).resolves.toBe(
+      "Consent request is invalid or expired",
+    );
+    expect(fixture.completeAuthorization).not.toHaveBeenCalled();
+    expect(fixture.entries.size).toBe(1);
+
+    const approved = await dispatch(
+      flow.handler,
+      consentRequest(state, csrf, cookie, "approve"),
+      fixture.env,
+    );
+    expect(approved.status).toBe(302);
+    expect(fixture.completeAuthorization).toHaveBeenCalledTimes(1);
     expect(fixture.entries.size).toBe(0);
   });
 });

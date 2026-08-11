@@ -234,9 +234,57 @@ async function pkceChallenge(verifier: string): Promise<string> {
   return bytesToBase64Url(new Uint8Array(digest));
 }
 
+async function accessPkce(): Promise<{
+  verifier: string;
+  challenge: string;
+}> {
+  while (true) {
+    const verifier = randomValue();
+    const challenge = await pkceChallenge(verifier);
+    if (/^[A-Za-z0-9]/u.test(challenge)) {
+      return { verifier, challenge };
+    }
+  }
+}
+
 function hasReadScope(request: AuthRequest): boolean {
   const scopes = new Set(request.scope);
   return scopes.size === 1 && scopes.has(READ_SCOPE);
+}
+
+function isAllowedMcpRedirectUri(value: string): boolean {
+  try {
+    const url = new URL(value);
+    const ipv4Parts = url.hostname.split(".");
+    const isIpv4Loopback =
+      ipv4Parts.length === 4 &&
+      ipv4Parts[0] === "127" &&
+      ipv4Parts.every((part) => {
+        const octet = Number(part);
+        return Number.isInteger(octet) && octet >= 0 && octet <= 255;
+      });
+    const isLocalHttp =
+      url.protocol === "http:" &&
+      (url.hostname === "localhost" ||
+        isIpv4Loopback ||
+        url.hostname === "[::1]");
+    return (
+      (url.protocol === "https:" || isLocalHttp) &&
+      url.username === "" &&
+      url.password === "" &&
+      url.hash === ""
+    );
+  } catch {
+    return false;
+  }
+}
+
+function hasS256Pkce(request: AuthRequest): boolean {
+  return (
+    request.codeChallengeMethod === "S256" &&
+    typeof request.codeChallenge === "string" &&
+    /^[A-Za-z0-9_-]{43}$/u.test(request.codeChallenge)
+  );
 }
 
 function getAccessConfiguration(env: Env): {
@@ -360,6 +408,18 @@ async function handleAuthorize(request: Request, env: Env): Promise<Response> {
     return textResponse("Invalid OAuth request", 400);
   }
 
+  if (!isAllowedMcpRedirectUri(oauthRequest.redirectUri)) {
+    return textResponse("Invalid OAuth redirect URI", 400);
+  }
+
+  if (!hasS256Pkce(oauthRequest)) {
+    return oauthErrorRedirect(
+      oauthRequest,
+      "invalid_request",
+      "PKCE S256 is required",
+    );
+  }
+
   if (!hasReadScope(oauthRequest)) {
     return oauthErrorRedirect(
       oauthRequest,
@@ -379,7 +439,8 @@ async function handleAuthorize(request: Request, env: Env): Promise<Response> {
 
   const access = getAccessConfiguration(env);
   const browserNonce = randomValue();
-  const codeVerifier = randomValue();
+  const { verifier: codeVerifier, challenge: codeChallenge } =
+    await accessPkce();
   const nonce = randomValue();
   const state = await putState<AccessState>(env, "access", {
     oauthRequest,
@@ -395,10 +456,7 @@ async function handleAuthorize(request: Request, env: Env): Promise<Response> {
   authorizationUrl.searchParams.set("scope", "openid email profile");
   authorizationUrl.searchParams.set("state", state);
   authorizationUrl.searchParams.set("nonce", nonce);
-  authorizationUrl.searchParams.set(
-    "code_challenge",
-    await pkceChallenge(codeVerifier),
-  );
+  authorizationUrl.searchParams.set("code_challenge", codeChallenge);
   authorizationUrl.searchParams.set("code_challenge_method", "S256");
   return redirectResponse(
     authorizationUrl.toString(),
@@ -416,6 +474,7 @@ async function exchangeAccessCode(
   const response = await fetcher(access.tokenUrl, {
     method: "POST",
     cache: "no-store",
+    redirect: "error",
     headers: {
       Accept: "application/json",
       "Content-Type": "application/x-www-form-urlencoded",
@@ -466,10 +525,28 @@ async function verifyIdentity(
         algorithms: ["RS256"],
         audience: env.ACCESS_CLIENT_ID,
         issuer: access.issuer,
-        requiredClaims: ["exp", "sub", "email", "nonce"],
+        requiredClaims: ["exp", "iat", "sub", "email", "nonce"],
       },
     ));
   } catch {
+    throw new FlowError(403, "Cloudflare Access identity verification failed");
+  }
+
+  const audiences = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
+  const hasExpectedAudience =
+    audiences.length > 0 &&
+    audiences.every((audience) => typeof audience === "string") &&
+    audiences.includes(env.ACCESS_CLIENT_ID);
+  const hasValidAuthorizedParty =
+    audiences.length > 1
+      ? payload.azp === env.ACCESS_CLIENT_ID
+      : payload.azp === undefined || payload.azp === env.ACCESS_CLIENT_ID;
+  if (
+    !hasExpectedAudience ||
+    !hasValidAuthorizedParty ||
+    typeof payload.iat !== "number" ||
+    !Number.isFinite(payload.iat)
+  ) {
     throw new FlowError(403, "Cloudflare Access identity verification failed");
   }
 

@@ -5,6 +5,7 @@ import { createAuthorizationHandler } from "./auth";
 import {
   READ_SCOPE,
   getMcpServerUrl,
+  hasReadAuthorizationProps,
   hasCurrentReadAuthorizationProps,
   type Env,
 } from "./env";
@@ -16,19 +17,52 @@ const mcpHandler = createMcpHandler(createCosenseMcpServer, {
   corsOptions: false,
 });
 
-const mcpApiHandler = {
+function authorizationChallenge(
+  mcpUrl: URL,
+  error: "insufficient_scope" | "invalid_token",
+): string {
+  const resourceMetadata = new URL(
+    `/.well-known/oauth-protected-resource${mcpUrl.pathname}`,
+    mcpUrl,
+  );
+  const scope = error === "insufficient_scope" ? `, scope="${READ_SCOPE}"` : "";
+  const description =
+    error === "insufficient_scope"
+      ? "Required scope is missing"
+      : "The authorization is no longer valid";
+  return `Bearer realm="OAuth", resource_metadata="${resourceMetadata}", error="${error}"${scope}, error_description="${description}"`;
+}
+
+function authorizationErrorResponse(
+  status: 401 | 403,
+  challenge: string,
+): Response {
+  return new Response(status === 401 ? "Invalid token" : "Insufficient scope", {
+    status,
+    headers: {
+      "Cache-Control": "no-store",
+      "Content-Type": "text/plain; charset=utf-8",
+      Pragma: "no-cache",
+      "WWW-Authenticate": challenge,
+    },
+  });
+}
+
+export const mcpApiHandler = {
   async fetch(request, env, context) {
     const props = (context as ExecutionContext & { props?: unknown }).props;
+    const mcpUrl = getMcpServerUrl(env.MCP_SERVER_URL);
+    if (!hasReadAuthorizationProps(props)) {
+      return authorizationErrorResponse(
+        403,
+        authorizationChallenge(mcpUrl, "insufficient_scope"),
+      );
+    }
     if (!hasCurrentReadAuthorizationProps(props, env.ALLOWED_EMAIL)) {
-      return new Response("Insufficient scope", {
-        status: 403,
-        headers: {
-          "Cache-Control": "no-store",
-          "Content-Type": "text/plain; charset=utf-8",
-          Pragma: "no-cache",
-          "WWW-Authenticate": `Bearer error="insufficient_scope", scope="${READ_SCOPE}"`,
-        },
-      });
+      return authorizationErrorResponse(
+        401,
+        authorizationChallenge(mcpUrl, "invalid_token"),
+      );
     }
     return mcpHandler(request, env, context);
   },
