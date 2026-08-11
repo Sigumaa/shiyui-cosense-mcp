@@ -1,0 +1,514 @@
+import { describe, expect, it, vi } from "vitest";
+
+import {
+  CosenseResponseError,
+  CosenseUpstreamError,
+  createCosenseClient,
+} from "../src/cosense";
+
+interface FetchCall {
+  url: string;
+  init: RequestInit | undefined;
+}
+
+interface JsonFixture {
+  body?: unknown;
+  status?: number;
+}
+
+function createFixtureFetch(...fixtures: JsonFixture[]): {
+  fetcher: typeof fetch;
+  calls: FetchCall[];
+} {
+  const calls: FetchCall[] = [];
+  let fixtureIndex = 0;
+  const fetcher: typeof fetch = async (input, init) => {
+    calls.push({ url: String(input), init });
+    const fixture = fixtures[fixtureIndex];
+    fixtureIndex += 1;
+    if (!fixture) throw new Error("Unexpected fetch call");
+    return new Response(
+      fixture.body === undefined ? null : JSON.stringify(fixture.body),
+      {
+        status: fixture.status ?? 200,
+        headers: { "Content-Type": "application/json" },
+      },
+    );
+  };
+  return { fetcher, calls };
+}
+
+function expectAnonymousJsonGet(call: FetchCall): void {
+  expect(call.init?.method).toBe("GET");
+  expect(call.init?.cache).toBe("no-store");
+  expect(call.init).not.toHaveProperty("credentials");
+  const headers = new Headers(call.init?.headers);
+  expect(headers.get("accept")).toBe("application/json");
+  expect(headers.has("authorization")).toBe(false);
+  expect(headers.has("cookie")).toBe(false);
+  expect(headers.has("x-personal-access-token")).toBe(false);
+  expect(headers.has("x-service-account-access-key")).toBe(false);
+}
+
+describe("getPage", () => {
+  it("encodes the complete title and returns only the compact existing-page shape", async () => {
+    const { fetcher, calls } = createFixtureFetch({
+      body: {
+        persistent: true,
+        title: "日本語 /%?#",
+        id: "page-id",
+        commitId: "commit-id",
+        lines: [
+          { id: "title-line", text: "日本語 /%?#" },
+          { id: "body-1", text: "first" },
+          { id: "body-2", text: "second" },
+        ],
+        created: 0,
+        updated: 1,
+        pageRank: 3.5,
+        linked: 4,
+        links: ["linked page"],
+        user: { email: "must-not-leak@example.com" },
+      },
+    });
+
+    const result = await createCosenseClient(fetcher).getPage({
+      title: "日本語 /%?#",
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe(
+      "https://scrapbox.io/api/pages/v2/shiyui/%E6%97%A5%E6%9C%AC%E8%AA%9E%20%2F%25%3F%23",
+    );
+    expectAnonymousJsonGet(calls[0] as FetchCall);
+    expect(result).toEqual({
+      exists: true,
+      title: "日本語 /%?#",
+      canonicalUrl:
+        "https://scrapbox.io/shiyui/%E6%97%A5%E6%9C%AC%E8%AA%9E%20%2F%25%3F%23",
+      pageId: "page-id",
+      commitId: "commit-id",
+      text: "first\nsecond",
+      createdAt: "1970-01-01T00:00:00.000Z",
+      updatedAt: "1970-01-01T00:00:01.000Z",
+      pageRank: 3.5,
+      linked: 4,
+      links: ["linked page"],
+    });
+  });
+
+  it("does not expose fake identifiers from a non-persistent page", async () => {
+    const { fetcher } = createFixtureFetch({
+      body: {
+        persistent: false,
+        title: "not created",
+        id: "fake-page-id",
+        commitId: "fake-commit-id",
+        lines: [{ id: "fake-line-id", text: "not created" }],
+        updated: 1,
+      },
+    });
+
+    await expect(
+      createCosenseClient(fetcher).getPage({ title: "not created" }),
+    ).resolves.toEqual({
+      exists: false,
+      title: "not created",
+      canonicalUrl: "https://scrapbox.io/shiyui/not%20created",
+    });
+  });
+
+  it("returns a normal missing-page result for a 404", async () => {
+    const { fetcher } = createFixtureFetch({ status: 404 });
+
+    await expect(
+      createCosenseClient(fetcher).getPage({ title: "not linked" }),
+    ).resolves.toEqual({
+      exists: false,
+      title: "not linked",
+      canonicalUrl: "https://scrapbox.io/shiyui/not%20linked",
+    });
+  });
+
+  it("rejects blank input without making a request", async () => {
+    const { fetcher, calls } = createFixtureFetch();
+
+    await expect(
+      createCosenseClient(fetcher).getPage({ title: " \n " }),
+    ).rejects.toThrow("Must not be blank");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("rejects dot-segment titles before URL construction", async () => {
+    const { fetcher, calls } = createFixtureFetch();
+
+    await expect(
+      createCosenseClient(fetcher).getPage({ title: ".." }),
+    ).rejects.toThrow("Dot-segment titles are not supported");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("reports a schema error when a persistent page lacks required identifiers", async () => {
+    const { fetcher } = createFixtureFetch({
+      body: {
+        persistent: true,
+        title: "broken",
+        lines: [{ text: "broken" }],
+      },
+    });
+
+    await expect(
+      createCosenseClient(fetcher).getPage({ title: "broken" }),
+    ).rejects.toBeInstanceOf(CosenseResponseError);
+  });
+});
+
+describe("request errors", () => {
+  it("does not read or expose a non-2xx response body", async () => {
+    const response = new Response("secret upstream details", { status: 429 });
+    const jsonSpy = vi.spyOn(response, "json");
+    const fetcher: typeof fetch = async () => response;
+
+    const promise = createCosenseClient(fetcher).searchFullText({
+      query: "private query",
+    });
+
+    await expect(promise).rejects.toMatchObject({
+      name: "CosenseUpstreamError",
+      status: 429,
+      operation: "full-text search",
+      message: "Cosense full-text search request failed with status 429.",
+    });
+    await expect(promise).rejects.not.toThrow("secret upstream details");
+    expect(jsonSpy).not.toHaveBeenCalled();
+  });
+
+  it("wraps malformed JSON as a response error", async () => {
+    const fetcher: typeof fetch = async () =>
+      new Response("not json", {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+
+    await expect(
+      createCosenseClient(fetcher).searchVector({ query: "query" }),
+    ).rejects.toMatchObject({
+      name: "CosenseResponseError",
+      operation: "vector search",
+      message: "Cosense returned an invalid vector search response.",
+    });
+  });
+});
+
+describe("searchFullText", () => {
+  it("uses URLSearchParams, OR matching, local limits, and compact results", async () => {
+    const { fetcher, calls } = createFixtureFetch({
+      body: {
+        count: 25,
+        existsExactTitleMatch: true,
+        pages: [
+          {
+            title: "first / page",
+            lines: ["first match", "second match"],
+            words: ["検索", "word"],
+            updated: 1,
+            pageRank: 9,
+            id: "not-returned",
+          },
+          {
+            title: "second",
+            lines: ["another match"],
+            words: ["検索"],
+          },
+          {
+            title: "third",
+            lines: ["locally omitted"],
+            words: ["検索"],
+          },
+        ],
+      },
+    });
+
+    const result = await createCosenseClient(fetcher).searchFullText({
+      query: "検索 /%?#",
+      match: "or",
+      sort: "updated",
+      limit: 2,
+    });
+
+    expect(calls[0]?.url).toBe(
+      "https://scrapbox.io/api/pages/shiyui/search/query?q=%E6%A4%9C%E7%B4%A2+%2F%25%3F%23&op=or&sort=updated",
+    );
+    expectAnonymousJsonGet(calls[0] as FetchCall);
+    expect(result).toEqual({
+      reportedCount: 25,
+      exactTitleMatch: true,
+      returned: 2,
+      truncated: true,
+      results: [
+        {
+          title: "first / page",
+          snippet: "first match\nsecond match",
+          matchedWords: ["検索", "word"],
+          updatedAt: "1970-01-01T00:00:01.000Z",
+          pageRank: 9,
+          canonicalUrl: "https://scrapbox.io/shiyui/first%20%2F%20page",
+        },
+        {
+          title: "second",
+          snippet: "another match",
+          matchedWords: ["検索"],
+          canonicalUrl: "https://scrapbox.io/shiyui/second",
+        },
+      ],
+    });
+  });
+
+  it("omits op for AND matching and uses the default sort", async () => {
+    const { fetcher, calls } = createFixtureFetch({ body: { pages: [] } });
+
+    await createCosenseClient(fetcher).searchFullText({
+      query: "alpha beta",
+    });
+
+    expect(calls[0]?.url).toBe(
+      "https://scrapbox.io/api/pages/shiyui/search/query?q=alpha+beta&sort=pageRank",
+    );
+    expect(calls[0]?.url).not.toContain("op=");
+  });
+});
+
+describe("searchVector", () => {
+  it("sends only q and reports local truncation", async () => {
+    const { fetcher, calls } = createFixtureFetch({
+      body: {
+        pages: [
+          {
+            title: "real page",
+            score: 0.9,
+            exists: true,
+            updated: 2,
+            pageRank: 8,
+          },
+          { title: "empty page", score: 0.8, exists: false },
+          { title: "omitted", score: 0.7, exists: true },
+        ],
+      },
+    });
+
+    const result = await createCosenseClient(fetcher).searchVector({
+      query: "意味 /%?#",
+      limit: 2,
+    });
+
+    expect(calls[0]?.url).toBe(
+      "https://scrapbox.io/api/pages/shiyui/search/vector/titles?q=%E6%84%8F%E5%91%B3+%2F%25%3F%23",
+    );
+    expect(new URL(calls[0]?.url as string).searchParams.has("limit")).toBe(
+      false,
+    );
+    expect(result).toEqual({
+      returned: 2,
+      localTruncated: true,
+      results: [
+        {
+          title: "real page",
+          score: 0.9,
+          exists: true,
+          canonicalUrl: "https://scrapbox.io/shiyui/real%20page",
+          updatedAt: "1970-01-01T00:00:02.000Z",
+          pageRank: 8,
+        },
+        {
+          title: "empty page",
+          score: 0.8,
+          exists: false,
+          canonicalUrl: "https://scrapbox.io/shiyui/empty%20page",
+        },
+      ],
+    });
+  });
+});
+
+describe("getRelatedPages", () => {
+  it("calculates all 1-hop relation variants from normalized link fields", async () => {
+    const { fetcher, calls } = createFixtureFetch(
+      {
+        body: {
+          title: "Base Page",
+          links: ["Outgoing Page", "Both Page"],
+          ignored: "field",
+        },
+      },
+      {
+        body: {
+          links1hop: [
+            {
+              title: "Outgoing Page",
+              titleLc: "outgoing_page",
+              linksLc: [],
+              descriptions: ["out"],
+            },
+            {
+              title: "Incoming Page",
+              titleLc: "incoming_page",
+              linksLc: ["base_page"],
+              descriptions: ["in"],
+            },
+            {
+              title: "Both Page",
+              titleLc: "both_page",
+              linksLc: ["base_page"],
+              descriptions: ["both"],
+            },
+          ],
+          pagination: {
+            total: 9,
+            hasNext: true,
+            nextId: "next /%?#",
+            perPage: 3,
+          },
+        },
+      },
+    );
+
+    const result = await createCosenseClient(fetcher).getRelatedPages({
+      title: "Base Page",
+      hop: 1,
+      limit: 3,
+    });
+
+    expect(calls.map(({ url }) => url)).toEqual([
+      "https://scrapbox.io/api/pages/v2/shiyui/Base%20Page",
+      "https://scrapbox.io/api/pages/v2/shiyui/Base%20Page/links1hop?perPage=3",
+    ]);
+    for (const call of calls) expectAnonymousJsonGet(call);
+    expect(result).toEqual({
+      total: 9,
+      hasNext: true,
+      nextCursor: "next /%?#",
+      returned: 3,
+      results: [
+        {
+          title: "Outgoing Page",
+          descriptions: ["out"],
+          relation: "outgoing",
+          canonicalUrl: "https://scrapbox.io/shiyui/Outgoing%20Page",
+        },
+        {
+          title: "Incoming Page",
+          descriptions: ["in"],
+          relation: "incoming",
+          canonicalUrl: "https://scrapbox.io/shiyui/Incoming%20Page",
+        },
+        {
+          title: "Both Page",
+          descriptions: ["both"],
+          relation: "bidirectional",
+          canonicalUrl: "https://scrapbox.io/shiyui/Both%20Page",
+        },
+      ],
+    });
+  });
+
+  it("uses input-title normalization and empty links when the base page is 404", async () => {
+    const { fetcher } = createFixtureFetch(
+      { status: 404, body: { secret: "not read" } },
+      {
+        body: {
+          links1hop: [
+            {
+              title: "Backlink",
+              titleLc: "backlink",
+              linksLc: ["base_page"],
+            },
+          ],
+          pagination: { hasNext: false },
+        },
+      },
+    );
+
+    const result = await createCosenseClient(fetcher).getRelatedPages({
+      title: "Base Page",
+      hop: 1,
+    });
+
+    expect(result.results[0]?.relation).toBe("incoming");
+  });
+
+  it("propagates non-404 base-page failures", async () => {
+    const { fetcher } = createFixtureFetch(
+      { status: 503 },
+      { body: { links1hop: [], pagination: { hasNext: false } } },
+    );
+
+    await expect(
+      createCosenseClient(fetcher).getRelatedPages({
+        title: "Base Page",
+        hop: 1,
+      }),
+    ).rejects.toBeInstanceOf(CosenseUpstreamError);
+  });
+
+  it("builds the complete 2-hop search URL and never adds relation", async () => {
+    const { fetcher, calls } = createFixtureFetch({
+      body: {
+        links2hop: [
+          {
+            title: "Candidate / one",
+            descriptions: ["x".repeat(300), "2", "3", "4", "5", "omitted"],
+            pageRank: 2,
+            linked: 3,
+            updated: 4,
+            titleLc: "not-validated-for-2-hop",
+          },
+        ],
+        pagination: { total: 1, hasNext: false, nextId: null },
+      },
+    });
+
+    const result = await createCosenseClient(fetcher).getRelatedPages({
+      title: "日本語 /%?#",
+      hop: 2,
+      query: "検索 /%?#",
+      match: "or",
+      limit: 7,
+      cursor: "cursor /%?#",
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe(
+      "https://scrapbox.io/api/pages/v2/shiyui/%E6%97%A5%E6%9C%AC%E8%AA%9E%20%2F%25%3F%23/links2hop?perPage=7&search=%E6%A4%9C%E7%B4%A2+%2F%25%3F%23&op=or&nextId=cursor+%2F%25%3F%23",
+    );
+    expect(result).toEqual({
+      total: 1,
+      hasNext: false,
+      returned: 1,
+      results: [
+        {
+          title: "Candidate / one",
+          descriptions: ["x".repeat(240), "2", "3", "4", "5"],
+          pageRank: 2,
+          linked: 3,
+          updatedAt: "1970-01-01T00:00:04.000Z",
+          canonicalUrl: "https://scrapbox.io/shiyui/Candidate%20%2F%20one",
+        },
+      ],
+    });
+    expect(result.results[0]).not.toHaveProperty("relation");
+    expect(result).not.toHaveProperty("nextCursor");
+  });
+
+  it("rejects pagination that advertises a next page without a cursor", async () => {
+    const { fetcher } = createFixtureFetch({
+      body: {
+        links2hop: [],
+        pagination: { hasNext: true, nextId: "" },
+      },
+    });
+
+    await expect(
+      createCosenseClient(fetcher).getRelatedPages({ title: "page", hop: 2 }),
+    ).rejects.toBeInstanceOf(CosenseResponseError);
+  });
+});

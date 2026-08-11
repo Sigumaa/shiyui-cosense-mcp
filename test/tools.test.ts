@@ -1,0 +1,227 @@
+import type {
+  AuthInfo,
+  McpHandlerRequestOptions,
+} from "@modelcontextprotocol/server";
+import { createMcpHandler, type StatelessMcpHandler } from "agents/mcp/server";
+import { describe, expect, it, vi } from "vitest";
+
+import type { CosenseClient } from "../src/cosense";
+import { READ_SCOPE } from "../src/env";
+import { createCosenseMcpServer } from "../src/tools";
+
+const MODERN_PROTOCOL_VERSION = "2026-07-28";
+
+interface JsonRpcResponse {
+  error?: { code: number; message: string };
+  id: number;
+  jsonrpc: "2.0";
+  result?: Record<string, unknown>;
+}
+
+const authorizedProps = {
+  sub: "test-user",
+  email: "allowed@example.com",
+  scopes: [READ_SCOPE],
+};
+
+const authorizedAuthInfo: AuthInfo = {
+  token: "test-token",
+  clientId: "test-client",
+  scopes: [READ_SCOPE],
+};
+
+function createStubClient(): CosenseClient {
+  return {
+    getPage: vi.fn(async ({ title }) => ({
+      exists: true,
+      title,
+      canonicalUrl: `https://scrapbox.io/shiyui/${encodeURIComponent(title)}`,
+      pageId: "page-id",
+      commitId: "commit-id",
+      text: "short body",
+    })),
+    searchFullText: vi.fn(async () => ({
+      returned: 0,
+      truncated: false,
+      results: [],
+    })),
+    searchVector: vi.fn(async () => ({
+      returned: 0,
+      localTruncated: false,
+      results: [],
+    })),
+    getRelatedPages: vi.fn(async () => ({
+      hasNext: false,
+      returned: 0,
+      results: [],
+    })),
+  };
+}
+
+function createHandler(
+  client: CosenseClient,
+  props: Record<string, unknown> = authorizedProps,
+): StatelessMcpHandler {
+  return createMcpHandler(
+    (requestContext) => createCosenseMcpServer(requestContext, client),
+    {
+      route: "/mcp",
+      legacy: "reject",
+      corsOptions: false,
+      authContext: { props },
+    },
+  );
+}
+
+async function modernRequest(
+  handler: StatelessMcpHandler,
+  method: string,
+  params: Record<string, unknown> = {},
+  requestOptions: McpHandlerRequestOptions = {
+    authInfo: authorizedAuthInfo,
+  },
+): Promise<JsonRpcResponse> {
+  const headers = new Headers({
+    "Content-Type": "application/json",
+    Host: "localhost",
+    "Mcp-Method": method,
+    "MCP-Protocol-Version": MODERN_PROTOCOL_VERSION,
+  });
+  if (method === "tools/call" && typeof params.name === "string") {
+    headers.set("Mcp-Name", params.name);
+  }
+
+  const response = await handler.fetch(
+    new Request("http://localhost/mcp", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method,
+        params: {
+          ...params,
+          _meta: {
+            "io.modelcontextprotocol/protocolVersion": MODERN_PROTOCOL_VERSION,
+            "io.modelcontextprotocol/clientCapabilities": {},
+          },
+        },
+      }),
+    }),
+    requestOptions,
+  );
+
+  if (response.status !== 200) {
+    throw new Error(
+      `Unexpected HTTP ${response.status}: ${await response.text()}`,
+    );
+  }
+  return response.json<JsonRpcResponse>();
+}
+
+describe("createCosenseMcpServer", () => {
+  it("publishes only the four fixed-project read tools with private no-cache metadata", async () => {
+    const response = await modernRequest(
+      createHandler(createStubClient()),
+      "tools/list",
+    );
+    expect(response.error).toBeUndefined();
+
+    const result = response.result as {
+      cacheScope: string;
+      resultType: string;
+      tools: Array<{
+        annotations?: Record<string, unknown>;
+        inputSchema: { properties?: Record<string, unknown> };
+        name: string;
+      }>;
+      ttlMs: number;
+    };
+
+    expect(result).toMatchObject({
+      resultType: "complete",
+      ttlMs: 0,
+      cacheScope: "private",
+    });
+    expect(result.tools.map(({ name }) => name)).toEqual([
+      "get_page",
+      "search_full_text",
+      "search_vector",
+      "get_related_pages",
+    ]);
+
+    const expectedProperties = {
+      get_page: ["title"],
+      search_full_text: ["limit", "match", "query", "sort"],
+      search_vector: ["limit", "query"],
+      get_related_pages: ["cursor", "hop", "limit", "match", "query", "title"],
+    };
+
+    for (const tool of result.tools) {
+      expect(tool.annotations).toMatchObject({
+        readOnlyHint: true,
+        openWorldHint: true,
+      });
+      expect(Object.keys(tool.inputSchema.properties ?? {}).sort()).toEqual(
+        expectedProperties[tool.name as keyof typeof expectedProperties],
+      );
+    }
+  });
+
+  it("returns compact text plus structured content for an authorized tool call", async () => {
+    const client = createStubClient();
+    const response = await modernRequest(createHandler(client), "tools/call", {
+      name: "get_page",
+      arguments: { title: "test page" },
+    });
+
+    expect(response.error).toBeUndefined();
+    expect(response.result).toMatchObject({
+      resultType: "complete",
+      content: [
+        {
+          type: "text",
+          text: "Loaded “test page” (10 characters).",
+        },
+      ],
+      structuredContent: {
+        exists: true,
+        title: "test page",
+        text: "short body",
+      },
+    });
+    expect(client.getPage).toHaveBeenCalledOnce();
+    expect(client.getPage).toHaveBeenCalledWith({ title: "test page" });
+  });
+
+  it("rejects a tool call without the read scope before invoking Cosense", async () => {
+    const client = createStubClient();
+    const response = await modernRequest(
+      createHandler(client),
+      "tools/call",
+      {
+        name: "get_page",
+        arguments: { title: "test page" },
+      },
+      {
+        authInfo: {
+          ...authorizedAuthInfo,
+          scopes: [],
+        },
+      },
+    );
+
+    expect(response.error).toBeUndefined();
+    expect(response.result).toMatchObject({
+      resultType: "complete",
+      isError: true,
+      content: [
+        {
+          type: "text",
+          text: `Authorization with ${READ_SCOPE} is required.`,
+        },
+      ],
+    });
+    expect(client.getPage).not.toHaveBeenCalled();
+  });
+});

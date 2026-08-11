@@ -1,0 +1,7 @@
+minimumReleaseAge: 10080
+minimumReleaseAgeStrict: true
+minimumReleaseAgeIgnoreMissingTime: false
+allowBuilds:
+  esbuild: true
+  workerd: true
+  core-js-pure: false
