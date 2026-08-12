@@ -2,7 +2,7 @@
 
 調査日: 2026-08-12（JST）
 
-状態: 調査、アプリケーション実装、Cloudflare Access設定、Workerデプロイを完了。Production URLの未認証保護を確認済み。Preview URLは使用しない。ChatGPTからの認証済みread callは未確認。
+状態: 調査、アプリケーション実装、Cloudflare Access設定、Workerデプロイを完了。Production URLの未認証保護とPreview URLの無効化を確認済み。ChatGPTからの認証済みread callは未確認。
 
 ## 結論
 
