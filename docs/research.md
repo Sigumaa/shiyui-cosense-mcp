@@ -2,7 +2,7 @@
 
 調査日: 2026-08-12（JST）
 
-状態: 調査完了。v1設計を確定し、アプリケーションコードとfixture testを実装。Cloudflare Access設定とデプロイは未実施。
+状態: 調査とアプリケーション実装を完了。Cloudflare Access設定とデプロイは未実施。
 
 ## 結論
 
@@ -22,9 +22,9 @@
 3. `search_vector`
 4. `get_related_pages`
 
-Cosense 側は完全に secretless とし、MCP endpoint 自体は OAuth で一人だけに制限する。Cloudflare Workers では、現行の stateless `createMcpHandler()`、`@modelcontextprotocol/server` v2、`@cloudflare/workers-oauth-provider`、OAuth 専用の `OAUTH_KV` を使う。MCP session、Durable Objects、D1、R2、独自 cache、同期 job は不要である。
+Cosense 側は完全に secretless とし、MCP endpoint 自体は Cloudflare Access Managed OAuth で一人だけに制限する。WorkerはAccessが付与する `Cf-Access-Jwt-Assertion` を検証してからstateless `createMcpHandler()`を実行する。KV、OAuth secret、MCP session、Durable Objects、D1、R2、独自cache、同期jobは不要である。
 
-OAuth の本人確認はCloudflare Access for SaaSとし、許可email 1件 + One-time PIN policyを使う。Worker callbackでも同じemailを完全一致で検証する。
+本人確認は許可email 1件 + One-time PINのAccess policyに委譲する。Workerは署名、issuer、Application Audience、有効期限だけを検証し、同じemail判定やcustom scopeを重複実装しない。
 
 ## 調査範囲と根拠
 
@@ -36,7 +36,7 @@ OAuth の本人確認はCloudflare Access for SaaSとし、許可email 1件 + On
 | [`helpfeel/cosense-cli`](https://github.com/helpfeel/cosense-cli/tree/e06bc890958cfe8d1b6fe932db06c35eb8c8577d)                     | `e06bc890958cfe8d1b6fe932db06c35eb8c8577d`（v1.10.1）                  |
 | Cosense 公式 Help / 本番 API / Web client                                                                                           | 2026-08-12 に確認                                                      |
 | MCP specification                                                                                                                   | [2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28) |
-| Cloudflare Agents / OAuth Provider                                                                                                  | 2026-08-12 の公式 documentation と current example                     |
+| Cloudflare Agents / Access Managed OAuth                                                                                            | 2026-08-12 の公式 documentation と current example                     |
 | OpenAI ChatGPT Developer mode / plugin documentation                                                                                | 2026-08-12 に確認                                                      |
 
 Cosense は公式に、掲載 API を内部 API とし、予告なく変更する可能性があると明記している。そのため本報告では、次の3種類を区別する。
@@ -256,7 +256,7 @@ Smart Contextは1 requestで大量本文を取れる利点があるが、次の�
 
 検索結果は候補発見にだけ使い、最終本文は必ず `get_page` で Pages API v2から再取得する。MCPは本文を保存せず、Workers subrequestには `cache: "no-store"` を指定する。[Workers fetch](https://developers.cloudflare.com/workers/runtime-apis/fetch/) 今回の実測は `CF-Cache-Status:DYNAMIC` だったが、`scrapbox.io` 自体もCloudflare配下であり、この指定だけでCosense側CDNの将来挙動まで保証しない。CosenseとCloudflareに公開されたcache freshness契約がない点は残る。
 
-MCP responseにも `Cache-Control: no-store` を付け、Cache API、Cache Rules、KVへの本文保存を行わない。OAuth Providerが保存するtoken stateは本文cacheとは別物である。
+MCP responseにも `Cache-Control: no-store` を付け、Cache API、Cache Rules、KVへの本文保存を行わない。
 
 ## Cosense側secretの比較
 
@@ -293,7 +293,7 @@ PAT / Service Accountを導入する場合は `wrangler secret put` でsecret bi
 
 ## 推奨MCP tool仕様
 
-projectはsource定数 `shiyui` とし、tool引数にprojectやURLを持たせない。MCP endpoint全体でOAuth `cosense:read` scopeを要求し、各toolは `annotations.readOnlyHint: true`、`openWorldHint: true` とする。外部CosenseへGETするため `openWorldHint` はfalseにしない。現行specで `destructiveHint` / `idempotentHint` は `readOnlyHint:false` の場合だけ意味を持つため、read toolでは省略する。
+projectはsource定数 `shiyui` とし、tool引数にprojectやURLを持たせない。MCP endpoint全体をAccess policyで保護し、各toolは `annotations.readOnlyHint: true`、`openWorldHint: true` とする。外部CosenseへGETするため `openWorldHint` はfalseにしない。現行specで `destructiveHint` / `idempotentHint` は `readOnlyHint:false` の場合だけ意味を持つため、read toolでは省略する。
 
 ### `get_page`
 
@@ -392,21 +392,22 @@ projectはsource定数 `shiyui` とし、tool引数にprojectやURLを持たせ�
 | Project users / members                | ChatGPTの検索・本文理解に不要。個人情報とrequestが増える                                                                                                                                                                                                     |
 | Infobox table生成                      | generated resultにhallucination/truncated flagがあり、本文からの参照を優先                                                                                                                                                                                   |
 | page creation / append / edit / delete | read-only要件。write code自体を置かない                                                                                                                                                                                                                      |
-| arbitrary project / arbitrary URL      | 固定scopeとSSRF防止に反する                                                                                                                                                                                                                                  |
+| arbitrary project / arbitrary URL      | 固定projectとSSRF防止に反する                                                                                                                                                                                                                                |
 | 独自embedding / vector DB / index      | Cosenseのvectorを利用する                                                                                                                                                                                                                                    |
 | cache / background sync / cron         | 最新性を損ね、運用対象を増やす                                                                                                                                                                                                                               |
 | D1 / R2 / Queue / MCP用Durable Object  | stateless tool callには不要                                                                                                                                                                                                                                  |
 
 ## Cloudflare Workers / MCP / OAuth
 
-### 推奨architecture
+### Architecture
 
 ```text
 ChatGPT
   -> HTTPS Streamable HTTP /mcp
-  -> @cloudflare/workers-oauth-provider
-     -> Cloudflare Accessで本人確認・一人だけ許可
-     -> OAUTH_KV（OAuth state/identity/code/token/grant/client metadataのみ。Cosense dataなし）
+  -> Cloudflare Access Managed OAuth
+     -> 許可email 1件 + One-time PIN policy
+     -> Cf-Access-Jwt-Assertion
+  -> Workerで署名 / issuer / Application Audience / expを検証
   -> createMcpHandler(createServer)
   -> 4 read-only tools
   -> fetch(cache: "no-store")
@@ -419,10 +420,9 @@ Cloudflare はgreenfield serverに stateless `createMcpHandler()` を推奨し�
 
 - `agents`
 - `@modelcontextprotocol/server` v2
-- `@cloudflare/workers-oauth-provider`
 - `zod`
 - `wrangler`（dev dependency）
-- `jose`
+- `jose`（Access assertion検証）
 
 直接dependencyは `package.json`、解決した全dependencyは `pnpm-lock.yaml` に固定する。`pnpm-workspace.yaml` の `minimumReleaseAge: 10080` により、直接・間接とも公開後7日未満のversionと公開日時不明のversionを拒否する。公式 `cosense-cli` はNode >=24と`tsx`を前提にしたCLIで、Workersに載せると不要なcommand/file/system処理が増えるためdependencyにはしない。
 
@@ -432,45 +432,31 @@ Cloudflare はgreenfield serverに stateless `createMcpHandler()` を推奨し�
 
 ChatGPT Developer modeは公開HTTPSのStreamable HTTP `/mcp`を登録でき、OAuth、No Authentication、Mixed Authenticationを扱う。今回のtoolはすべてOAuth必須にする。tool metadata変更後はapp settingsでRefreshし、新しいconversationで確認する。[Connect to ChatGPT](https://developers.openai.com/plugins/deploy/connect-chatgpt) [Plugin authentication](https://developers.openai.com/plugins/build/auth)
 
-ChatGPTはCIMD、PKCE S256、DCR、pre-registered clientを扱い、現行はCIMDを優先する。MCP serverはProtected Resource Metadata、authorization server metadata、audience/resource、issuer、expiryを検証する。`resourceMetadata.resource` はcanonicalな `/mcp` URL、`authorization_servers` は同じWorkerのissuer URLにexact設定する。bearer validationとtoken stateは `workers-oauth-provider` に委譲するが、operation-level scopeとresource ownershipは自動強制されない。Workerは発行時のscopeを `cosense:read` だけに固定し、各toolでOAuth providerの暗号化propsと、利用可能な場合は標準 `AuthInfo.scopes` を検査する。独自token serverは実装しない。
-
-OpenAIのtool-level OAuth linking UIは各toolの `securitySchemes` も要求するが、MCP 2026-07-28 core `Tool` schemaにこのfieldはなく、現行 `@modelcontextprotocol/server` v2の高水準 `registerTool()` はtop-level extensionを保持しない。このecosystem gapを「SDKへ委譲済み」と扱わない。v1はまずendpoint全体をOAuthで保護し、実装時に次をcontract testする。[MCP Tool schema](https://modelcontextprotocol.io/specification/2026-07-28/server/tools) [OpenAI authentication](https://developers.openai.com/plugins/build/auth)
-
-- 実際の `tools/list` frameに、ChatGPTが必要とする `securitySchemes: [{"type":"oauth2","scopes":["cosense:read"]}]` が残るか。
-- 高水準SDKで残らない場合、currentな公式adapterがあるか。
-- 公式adapterがない場合、低水準 `tools/list` handlerでこのextensionだけを追加する最小実装に留める。
-- server-wide OAuthだけでChatGPTの接続UIが成立する場合、不要な独自adapterを追加しない。
+Managed OAuthはAccess edgeをOAuth authorization serverにする。Protected Resource Metadata、authorization server metadata、DCR、PKCE、authorization code、access / refresh token、policy再評価はCloudflareが担当する。WorkerはOAuth endpoint、callback、consent、state、grant、token storageを持たない。[Managed OAuth](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/managed-oauth/)
 
 ### one-user OAuthの選択
 
-採用: Cloudflare Access
+採用: Cloudflare Access Managed OAuth
 
 - Access policyで許可emailを1件に限定できる。
-- 本人判定をWorker codeのusername比較に置かない。
-- `ACCESS_CLIENT_ID`、`ACCESS_CLIENT_SECRET`、authorization/token/JWKS URL、`COOKIE_ENCRYPTION_KEY` が必要。
-- 設定項目は多いが、identity policyの責務が明確で、長期保守に向く。
+- One-time PINを本人確認に使える。
+- OAuthのstateとtokenをWorkerで保存しない。
+- Worker側のOAuth secretとKVが不要になる。
+- 4 toolすべて同じread-only権限なのでcustom scopeを設けない。
 
-AccessはMCPのOAuth serverそのものではなく、Workerの `/authorize` が使うupstream IdPである。Workerは最初に `parseAuthRequest` でMCP client、redirect URI、resource、scopeを検証し、現行MCP profileに合わせてredirect URIをHTTPSまたはloopbackに限定し、PKCE S256を必須にする。Access-for-SaaSへredirectし、専用 `/callback` でcodeをexchangeし、JWKSを使ってissuer、audience、expiry、issued-at、authorized party、nonce、state / CSRFを検証する。その後、一人用policyで確認したidentityと検証済みclient / scopeを表示する明示的な同意画面を挟み、同意POST自体もCSRF保護してから `completeAuthorization` を呼ぶ。これは一人用でもconfused-deputy対策として省略しない。ChatGPTがMCP OAuthへ戻るcallbackと、AccessからWorkerへ戻るupstream callbackは別URLである。
+Access for SaaSのGeneric OIDC applicationは使用しない。Self-hosted Access applicationでWorkerの公開hostnameを保護し、Managed OAuthとDCRを有効にする。Access policyはIncludeを本人のemail 1件にし、identity providerはOne-time PINだけを利用可能にする。
 
-Access policyだけを変更しても、すでに `OAUTH_KV` に発行済みのMCP grant / refresh tokenは即時失効しない。実装は各requestとtoken更新時に現在の `ALLOWED_EMAIL` を再検査する。全grantを失効する場合は、新しい空のKV namespaceへbindingを切り替える。
+### Origin assertion
 
-CloudflareのOAuth quick-deploy exampleには旧 `McpAgent` が残るものがある。認証handlerの考え方だけを使い、transportはcurrent stateless exampleを基準にする。[Cloudflare authorization options](https://developers.cloudflare.com/agents/model-context-protocol/protocol/authorization/) [Access guide](https://developers.cloudflare.com/cloudflare-one/access-controls/ai-controls/secure-mcp-servers/)
+Managed OAuthのclient bearerはopaqueであり、Workerでdecodeしない。Access edgeが認証後に付与する `Cf-Access-Jwt-Assertion` を、team domainのJWKSで検証する。
 
-### OAuth stateとbinding
+- JWKS: `https://<team>.cloudflareaccess.com/cdn-cgi/access/certs`
+- issuer: `https://<team>.cloudflareaccess.com`
+- audience: Access applicationのAudience tag
+- algorithm: RS256
+- time: `exp`を必須とし、存在する`nbf`も`jose`に検証させる
 
-必要なstateful componentは `OAUTH_KV` 1個だけである。OAuth Providerはauthorization code、PKCE challenge、access/refresh token、grant、client情報を保存する。標準TTLはcode 10分、access token 1時間、refresh token 30日、DCR client 90日。token等はhash化され、`props` は暗号化されるが、record key、user ID、一般metadataまで暗号化されるとは扱わない。code exchange後のgrantはtoken TTLとは別に残りうる。[workers-oauth-provider](https://github.com/cloudflare/workers-oauth-provider) [storage schema](https://github.com/cloudflare/workers-oauth-provider/blob/main/storage-schema.md)
-
-OAuth Providerは `clientIdMetadataDocumentEnabled: true`、`allowPlainPKCE: false`、`allowImplicitFlow: false` を明示する。`wrangler.jsonc` には少なくとも次が必要になる。
-
-- `nodejs_compat`
-- `global_fetch_strictly_public`（CIMD fetchのSSRF対策とadvertisingに必要）
-- `OAUTH_KV` binding
-
-CIMD supportの広告には `clientIdMetadataDocumentEnabled: true` と `global_fetch_strictly_public` の両方を満たす。implementation時点のcurrent `compatibility_date` を設定し、古いdate向けのcache compatibility fallbackは追加しない。
-
-Cosense dataをKVへ入れない。KVはeventual consistencyで地域間反映に60秒以上かかる場合があり、初回OAuth直後のtoken認識遅延はmaintenance riskとして受け入れる。[Workers KV consistency](https://developers.cloudflare.com/kv/concepts/how-kv-works/)
-
-DCRは現行MCPでdeprecatedであり、ChatGPT専用ならCIMDだけでよい。`createMcpHandler` は `legacy: "reject"` を明示し、current protocolだけを受け付ける。古いclient互換は要求されていないため、live ChatGPT testで不成立でもcustom legacy layerを黙って追加せず、観測したrevision差を報告して設計を再判断する。
+`TEAM_DOMAIN` と `POLICY_AUD` は非secretのWorker変数である。assertion欠落または検証失敗はWorker入口で403にし、tool handlerへ到達させない。emailの完全一致はAccess policyだけで行う。
 
 ## セキュリティ境界
 
@@ -480,56 +466,53 @@ DCRは現行MCPでdeprecatedであり、ChatGPT専用ならCIMDだけでよい�
 - LLMからURL、project、header、credential、file pathを受け取らない。
 - allowlist済みpath builder以外をfetchしない。
 - HTTP methodはGETだけ。write endpoint文字列、WebSocket dependency、edit operationをsourceに置かない。
-- `/mcp` 全体をOAuth `cosense:read` で保護し、handlerでOAuth propsと利用可能な `AuthInfo.scopes` を明示検査する。tool-level `securitySchemes` は前述のwire contractを満たす場合だけ宣言する。
-- invalid/expired tokenは401、insufficient scopeは403。
-- 認証challengeはOAuth Providerの `WWW-Authenticate` を使う。tool resultの `_meta["mcp/www_authenticate"]` はChatGPT実機で必要と確認した場合だけ追加する。
+- Workerの公開hostname全体をAccess applicationで保護する。
+- Worker入口で `Cf-Access-Jwt-Assertion` を検証し、欠落・不正・期限切れは403にする。
+- 未認証clientへの401とOAuth discoveryはAccess edgeに委譲する。
+- custom scopeとtool内の重複認可は実装しない。
 - `Origin` と current MCP mirrored headersの検証はSDK/handlerに委譲する。
-- response、OAuth error、authorize callbackをcacheしない。
-- logにpage本文、query、token、OAuth code、cookieを出さない。
+- responseをcacheしない。
+- logにpage本文、query、OAuth token、Access assertionを出さない。
 - upstream error bodyはそのままLLMへ返さず、statusと安全なcontextだけを返す。
 - responseのuser name/emailは不要なので除外する。
 
-## 実装フェーズの受け入れテスト
+## 受け入れテスト
 
-調査後に実装へ進む場合、最低限次を確認する。
+最低限次を確認する。
 
-| 対象             | 確認内容                                                                                                                                                                                                                            |
-| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `get_page`       | `日記`、`2026-08-11`、日本語、space、`/ % ? #`を含むtitle、未作成page                                                                                                                                                               |
-| 最新性           | test page更新直後に本文、`commitId`、`updated`が変わること。保証値にはしない                                                                                                                                                        |
-| full-text        | AND、OR、pageRank、updated、limit slice、empty result                                                                                                                                                                               |
-| vector           | semantic query、score順、`exists:false`、limit slice                                                                                                                                                                                |
-| related          | 1-hop、2-hop、search、OR、relation、pagination metadata、empty result                                                                                                                                                               |
-| response         | raw巨大responseやuser emailを返さない                                                                                                                                                                                               |
-| read-only        | registered toolが4つだけ、GET以外が存在しない                                                                                                                                                                                       |
-| scope            | arbitrary project、arbitrary URL、file fetchをschema上も実装上も受け付けない                                                                                                                                                        |
-| cache            | upstream subrequestがno-store、MCP responseもno-store、KVにCosense dataなし                                                                                                                                                         |
-| OAuth            | metadata discovery、PKCE、client/redirect/resource/scope検証、同意画面とCSRF、Access callbackのissuer/audience/nonce/state、未認証401、別user拒否、期限切れtoken拒否、現在のemail再検査、KV切替による全grant失効、runtime challenge |
-| protocol         | MCP Inspectorでdiscovery/list/call、current headers、JSON response、`resultType` / cache hintsを確認                                                                                                                                |
-| OpenAI extension | raw `tools/list` frameの `securitySchemes` 有無とChatGPT OAuth UIを確認。必要なら最小adapter                                                                                                                                        |
-| ChatGPT          | Developer modeからOAuth、tool discovery、4 toolの実call、metadata Refreshを確認                                                                                                                                                     |
+| 対象             | 確認内容                                                                                             |
+| ---------------- | ---------------------------------------------------------------------------------------------------- |
+| `get_page`       | `日記`、`2026-08-11`、日本語、space、`/ % ? #`を含むtitle、未作成page                                |
+| 最新性           | test page更新直後に本文、`commitId`、`updated`が変わること。保証値にはしない                         |
+| full-text        | AND、OR、pageRank、updated、limit slice、empty result                                                |
+| vector           | semantic query、score順、`exists:false`、limit slice                                                 |
+| related          | 1-hop、2-hop、search、OR、relation、pagination metadata、empty result                                |
+| response         | raw巨大responseやuser emailを返さない                                                                |
+| read-only        | registered toolが4つだけ、GET以外が存在しない                                                        |
+| boundary         | arbitrary project、arbitrary URL、file fetchをschema上も実装上も受け付けない                         |
+| cache            | upstream subrequestとMCP responseがno-store、Workerに永続stateなし                                   |
+| Access assertion | 欠落、別application audience、期限切れを拒否し、正しいassertionだけtools/listへ到達                  |
+| protocol         | MCP Inspectorでdiscovery/list/call、current headers、JSON response、`resultType` / cache hintsを確認 |
+| ChatGPT          | Developer modeからOne-time PIN、tool discovery、read callを確認                                      |
 
-本番deploy前に `pnpm check`、MCP Inspector、local Workerを通す。ChatGPTのcallback URIはapp管理画面に表示される `https://chatgpt.com/connector/oauth/{callback_id}` を完全一致で登録する。固定の`callback_id`を仮定しない。
+deploy前に `pnpm check` と `wrangler deploy --dry-run` を通す。別環境のPoCは作らず、deploy後の最初のChatGPT接続を実利用確認にする。ChatGPTのcallback URIはapp管理画面に表示された値をDCR allowlistへ登録する。
 
 ## Maintenance risk
 
-| risk                               | 影響                            | 対応                                                                                       |
-| ---------------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------ |
-| Cosense内部APIの予告なし変更       | field/path/queryが壊れる        | endpointを4系統に限定、used fieldだけ検証、明確に失敗、公式CLI/releaseを更新時に確認       |
-| vector/full-text index遅延         | 検索直後に新pageが出ない        | 候補選択後は必ずPages v2。SLAを約束しない                                                  |
-| response上限の変更                 | 検索候補が欠落                  | observed valueを仕様化せず、returned/truncatedを返す                                       |
-| related pagination変更             | 続きの候補が取れない            | `perPage=limit`、`hasNext/nextId`をopaque cursorとして往復                                 |
-| rate limit非公開                   | 429や一時失敗                   | 1 call 1–2 request、N+1回避。429を明示し、無制限retryしない                                |
-| OAuth / MCPの速い変更              | ChatGPT接続が壊れる             | current Cloudflare SDKへ委譲、version固定、manual metadata Refresh、定期的なdependency更新 |
-| OAuth KV eventual consistency      | 認証直後の一時失敗              | OAuth用途に限定し、必要なら短時間後に再試行。DOを先行導入しない                            |
-| Access / IdP credential失効        | OAuth login失敗                 | secret rotation手順のみREADMEに記載、token本文をlogしない                                  |
-| Cloudflare quickstartの旧実装      | deprecated `McpAgent`を取り込む | current `mcp-worker` stateless exampleを基準にする                                         |
-| ChatGPT protocol revision差        | discovery/call不成立            | deploy後にlive test。根拠なしのcustom互換layerは追加しない                                 |
-| core MCPとOpenAI auth metadataの差 | tool-level OAuth UIが出ない     | raw frameをcontract test。公式supportを優先し、必要時だけ最小adapter                       |
+| risk                         | 影響                           | 対応                                                                                 |
+| ---------------------------- | ------------------------------ | ------------------------------------------------------------------------------------ |
+| Cosense内部APIの予告なし変更 | field/path/queryが壊れる       | endpointを4系統に限定、used fieldだけ検証、明確に失敗、公式CLI/releaseを更新時に確認 |
+| vector/full-text index遅延   | 検索直後に新pageが出ない       | 候補選択後は必ずPages v2。SLAを約束しない                                            |
+| response上限の変更           | 検索候補が欠落                 | observed valueを仕様化せず、returned/truncatedを返す                                 |
+| related pagination変更       | 続きの候補が取れない           | `perPage=limit`、`hasNext/nextId`をopaque cursorとして往復                           |
+| rate limit非公開             | 429や一時失敗                  | 1 call 1–2 request、N+1回避。429を明示し、無制限retryしない                          |
+| OAuth / MCPの変更            | ChatGPT接続が壊れる            | Cloudflare Accessとcurrent SDKへ委譲し、独自互換layerを足さない                      |
+| Access設定の誤り             | 認証またはWorker到達が失敗する | exact email policy、team domain、Application Audienceを確認                          |
+| ChatGPT protocol revision差  | discovery/call不成立           | 実利用で確認し、観測した問題だけを直す                                               |
 
 ## 確定した設計
 
-Cosense側はsecretless、toolは上記4つ、本文cacheなし、stateless Worker、OAuth専用KVとする。本人確認はCloudflare Access for SaaS、許可email 1件、One-time PINに確定した。core MCPとOpenAIの `securitySchemes` extensionの接続点は、標準実装のChatGPT実機確認後に必要な場合だけ追加する。
+Cosense側はsecretless、toolは上記4つ、本文cacheなし、stateless Workerとする。本人確認はCloudflare Access Managed OAuth、許可email 1件、One-time PINに確定した。Worker側の永続stateとOAuth secretは持たない。
 
 ## 調査成果物20項目の対応
 

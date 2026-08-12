@@ -1,8 +1,2 @@
-MCP_SERVER_URL=http://localhost:8787/mcp
-ACCESS_CLIENT_ID=replace-me
-ACCESS_CLIENT_SECRET=replace-me
-ACCESS_TOKEN_URL=https://replace-me.cloudflareaccess.com/cdn-cgi/access/sso/oidc/replace-me/token
-ACCESS_AUTHORIZATION_URL=https://replace-me.cloudflareaccess.com/cdn-cgi/access/sso/oidc/replace-me/authorization
-ACCESS_JWKS_URL=https://replace-me.cloudflareaccess.com/cdn-cgi/access/sso/oidc/replace-me/jwks
-ALLOWED_EMAIL=you@example.com
-COOKIE_ENCRYPTION_KEY=replace-with-openssl-rand-hex-32
+TEAM_DOMAIN=https://replace-me.cloudflareaccess.com
+POLICY_AUD=replace-me

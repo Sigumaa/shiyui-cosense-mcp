@@ -1,12 +1,7 @@
-import type {
-  AuthInfo,
-  McpHandlerRequestOptions,
-} from "@modelcontextprotocol/server";
 import { createMcpHandler, type StatelessMcpHandler } from "agents/mcp/server";
 import { describe, expect, it, vi } from "vitest";
 
 import type { CosenseClient } from "../src/cosense";
-import { READ_SCOPE } from "../src/env";
 import { createCosenseMcpServer } from "../src/tools";
 
 const MODERN_PROTOCOL_VERSION = "2026-07-28";
@@ -17,18 +12,6 @@ interface JsonRpcResponse {
   jsonrpc: "2.0";
   result?: Record<string, unknown>;
 }
-
-const authorizedProps = {
-  sub: "test-user",
-  email: "allowed@example.com",
-  scopes: [READ_SCOPE],
-};
-
-const authorizedAuthInfo: AuthInfo = {
-  token: "test-token",
-  clientId: "test-client",
-  scopes: [READ_SCOPE],
-};
 
 function createStubClient(): CosenseClient {
   return {
@@ -58,17 +41,13 @@ function createStubClient(): CosenseClient {
   };
 }
 
-function createHandler(
-  client: CosenseClient,
-  props: Record<string, unknown> = authorizedProps,
-): StatelessMcpHandler {
+function createHandler(client: CosenseClient): StatelessMcpHandler {
   return createMcpHandler(
     (requestContext) => createCosenseMcpServer(requestContext, client),
     {
       route: "/mcp",
       legacy: "reject",
       corsOptions: false,
-      authContext: { props },
     },
   );
 }
@@ -77,9 +56,6 @@ async function modernRequest(
   handler: StatelessMcpHandler,
   method: string,
   params: Record<string, unknown> = {},
-  requestOptions: McpHandlerRequestOptions = {
-    authInfo: authorizedAuthInfo,
-  },
 ): Promise<JsonRpcResponse> {
   const headers = new Headers({
     "Content-Type": "application/json",
@@ -108,7 +84,6 @@ async function modernRequest(
         },
       }),
     }),
-    requestOptions,
   );
 
   if (response.status !== 200) {
@@ -222,7 +197,7 @@ describe("createCosenseMcpServer", () => {
     }
   });
 
-  it("returns compact text plus structured content for an authorized tool call", async () => {
+  it("returns compact text plus structured content for a tool call", async () => {
     const client = createStubClient();
     const response = await modernRequest(createHandler(client), "tools/call", {
       name: "get_page",
@@ -246,36 +221,5 @@ describe("createCosenseMcpServer", () => {
     });
     expect(client.getPage).toHaveBeenCalledOnce();
     expect(client.getPage).toHaveBeenCalledWith({ title: "test page" });
-  });
-
-  it("rejects a tool call without the read scope before invoking Cosense", async () => {
-    const client = createStubClient();
-    const response = await modernRequest(
-      createHandler(client),
-      "tools/call",
-      {
-        name: "get_page",
-        arguments: { title: "test page" },
-      },
-      {
-        authInfo: {
-          ...authorizedAuthInfo,
-          scopes: [],
-        },
-      },
-    );
-
-    expect(response.error).toBeUndefined();
-    expect(response.result).toMatchObject({
-      resultType: "complete",
-      isError: true,
-      content: [
-        {
-          type: "text",
-          text: `Authorization with ${READ_SCOPE} is required.`,
-        },
-      ],
-    });
-    expect(client.getPage).not.toHaveBeenCalled();
   });
 });

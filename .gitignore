@@ -6,7 +6,6 @@ node_modules/
 .env*
 !.env.example
 .prod.secrets*
-!.prod.secrets.example
 
 .wrangler/
 coverage/

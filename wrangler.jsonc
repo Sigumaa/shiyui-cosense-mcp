@@ -4,12 +4,8 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-07-30",
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
-  "kv_namespaces": [
-    {
-      "binding": "OAUTH_KV",
-    },
-  ],
   "vars": {
-    "MCP_SERVER_URL": "https://replace-me.example/mcp",
+    "TEAM_DOMAIN": "https://shiyui.cloudflareaccess.com",
+    "POLICY_AUD": "0375c9e9977e7f72cc52124f4befaf6ee59cf0e7949aa375e973793a0edbc34b",
   },
 }

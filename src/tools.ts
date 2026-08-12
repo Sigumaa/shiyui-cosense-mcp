@@ -2,9 +2,7 @@ import {
   McpServer,
   type CallToolResult,
   type McpRequestContext,
-  type ServerContext,
 } from "@modelcontextprotocol/server";
-import { getMcpAuthContext } from "agents/mcp/server";
 import { z } from "zod";
 
 import {
@@ -13,7 +11,6 @@ import {
   createCosenseClient,
   type CosenseClient,
 } from "./cosense";
-import { READ_SCOPE, hasReadAuthorizationProps } from "./env";
 
 const annotations = {
   readOnlyHint: true,
@@ -96,20 +93,6 @@ const relatedPagesOutputSchema = z.object({
   ),
 });
 
-function requireReadAccess(
-  context: ServerContext,
-  requestContext: McpRequestContext,
-): void {
-  const standardAuth = context.http?.authInfo ?? requestContext.authInfo;
-  if (standardAuth && !standardAuth.scopes.includes(READ_SCOPE)) {
-    throw new Error("insufficient_scope");
-  }
-
-  if (!hasReadAuthorizationProps(getMcpAuthContext()?.props)) {
-    throw new Error("missing_authorization_context");
-  }
-}
-
 function success(value: object, summary: string): CallToolResult {
   return {
     content: [{ type: "text", text: summary }],
@@ -129,12 +112,6 @@ function failure(error: unknown): CallToolResult {
     } else {
       message = `Cosense request failed (HTTP ${error.status}).`;
     }
-  } else if (
-    error instanceof Error &&
-    (error.message === "insufficient_scope" ||
-      error.message === "missing_authorization_context")
-  ) {
-    message = `Authorization with ${READ_SCOPE} is required.`;
   }
 
   return {
@@ -144,7 +121,7 @@ function failure(error: unknown): CallToolResult {
 }
 
 export function createCosenseMcpServer(
-  requestContext: McpRequestContext,
+  _requestContext: McpRequestContext,
   client: CosenseClient = createCosenseClient(),
 ): McpServer {
   const server = new McpServer(
@@ -167,9 +144,8 @@ export function createCosenseMcpServer(
       outputSchema: getPageOutputSchema,
       annotations,
     },
-    async ({ title }, context) => {
+    async ({ title }) => {
       try {
-        requireReadAccess(context, requestContext);
         const value = await client.getPage({ title });
         return success(
           value,
@@ -198,9 +174,8 @@ export function createCosenseMcpServer(
       outputSchema: fullTextSearchOutputSchema,
       annotations,
     },
-    async (input, context) => {
+    async (input) => {
       try {
-        requireReadAccess(context, requestContext);
         const value = await client.searchFullText(input);
         return success(value, `Found ${value.returned} full-text candidates.`);
       } catch (error) {
@@ -222,9 +197,8 @@ export function createCosenseMcpServer(
       outputSchema: vectorSearchOutputSchema,
       annotations,
     },
-    async (input, context) => {
+    async (input) => {
       try {
-        requireReadAccess(context, requestContext);
         const value = await client.searchVector(input);
         return success(value, `Found ${value.returned} vector candidates.`);
       } catch (error) {
@@ -250,9 +224,8 @@ export function createCosenseMcpServer(
       outputSchema: relatedPagesOutputSchema,
       annotations,
     },
-    async (input, context) => {
+    async (input) => {
       try {
-        requireReadAccess(context, requestContext);
         const value = await client.getRelatedPages({
           title: input.title,
           hop: input.hop,
