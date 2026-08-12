@@ -220,6 +220,20 @@ describe("createCosenseMcpServer", () => {
       },
     });
     expect(client.getPage).toHaveBeenCalledOnce();
-    expect(client.getPage).toHaveBeenCalledWith({ title: "test page" });
+    expect(client.getPage).toHaveBeenCalledWith(
+      { title: "test page" },
+      expect.any(AbortSignal),
+    );
+  });
+
+  it("rejects oversized input before calling Cosense", async () => {
+    const client = createStubClient();
+    const response = await modernRequest(createHandler(client), "tools/call", {
+      name: "get_page",
+      arguments: { title: "日".repeat(501) },
+    });
+
+    expect(response.result).toMatchObject({ isError: true });
+    expect(client.getPage).not.toHaveBeenCalled();
   });
 });

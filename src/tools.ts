@@ -16,16 +16,17 @@ const annotations = {
   readOnlyHint: true,
   openWorldHint: true,
 } as const;
+const MAX_INPUT_LENGTH = 500;
 
 const titleSchema = z
   .string()
   .trim()
   .min(1)
-  .max(2_000)
+  .max(MAX_INPUT_LENGTH)
   .refine((title) => title !== "." && title !== "..", {
     message: "Dot-segment titles are not supported",
   });
-const querySchema = z.string().trim().min(1).max(2_000);
+const querySchema = z.string().trim().min(1).max(MAX_INPUT_LENGTH);
 const limitSchema = z.number().int().min(1).max(20).default(10);
 const matchSchema = z.enum(["and", "or"]).default("and");
 
@@ -144,9 +145,9 @@ export function createCosenseMcpServer(
       outputSchema: getPageOutputSchema,
       annotations,
     },
-    async ({ title }) => {
+    async ({ title }, context) => {
       try {
-        const value = await client.getPage({ title });
+        const value = await client.getPage({ title }, context.mcpReq.signal);
         return success(
           value,
           value.exists
@@ -174,9 +175,9 @@ export function createCosenseMcpServer(
       outputSchema: fullTextSearchOutputSchema,
       annotations,
     },
-    async (input) => {
+    async (input, context) => {
       try {
-        const value = await client.searchFullText(input);
+        const value = await client.searchFullText(input, context.mcpReq.signal);
         return success(value, `Found ${value.returned} full-text candidates.`);
       } catch (error) {
         return failure(error);
@@ -197,9 +198,9 @@ export function createCosenseMcpServer(
       outputSchema: vectorSearchOutputSchema,
       annotations,
     },
-    async (input) => {
+    async (input, context) => {
       try {
-        const value = await client.searchVector(input);
+        const value = await client.searchVector(input, context.mcpReq.signal);
         return success(value, `Found ${value.returned} vector candidates.`);
       } catch (error) {
         return failure(error);
@@ -219,21 +220,24 @@ export function createCosenseMcpServer(
         query: querySchema.optional(),
         match: matchSchema,
         limit: limitSchema,
-        cursor: z.string().min(1).max(2_000).optional(),
+        cursor: z.string().min(1).max(MAX_INPUT_LENGTH).optional(),
       }),
       outputSchema: relatedPagesOutputSchema,
       annotations,
     },
-    async (input) => {
+    async (input, context) => {
       try {
-        const value = await client.getRelatedPages({
-          title: input.title,
-          hop: input.hop,
-          match: input.match,
-          limit: input.limit,
-          ...(input.query === undefined ? {} : { query: input.query }),
-          ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
-        });
+        const value = await client.getRelatedPages(
+          {
+            title: input.title,
+            hop: input.hop,
+            match: input.match,
+            limit: input.limit,
+            ...(input.query === undefined ? {} : { query: input.query }),
+            ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+          },
+          context.mcpReq.signal,
+        );
         return success(value, `Found ${value.returned} related pages.`);
       } catch (error) {
         return failure(error);

@@ -2,7 +2,7 @@
 
 調査日: 2026-08-12（JST）
 
-状態: 調査とアプリケーション実装を完了。Cloudflare Access設定とデプロイは未実施。
+状態: 調査、アプリケーション実装、Cloudflare Access設定、Workerデプロイを完了。Production URLの未認証保護を確認済み。Preview URLは使用しない。ChatGPTからの認証済みread callは未確認。
 
 ## 結論
 
@@ -25,6 +25,8 @@
 Cosense 側は完全に secretless とし、MCP endpoint 自体は Cloudflare Access Managed OAuth で一人だけに制限する。WorkerはAccessが付与する `Cf-Access-Jwt-Assertion` を検証してからstateless `createMcpHandler()`を実行する。KV、OAuth secret、MCP session、Durable Objects、D1、R2、独自cache、同期jobは不要である。
 
 本人確認は許可email 1件 + One-time PINのAccess policyに委譲する。Workerは署名、issuer、Application Audience、有効期限だけを検証し、同じemail判定やcustom scopeを重複実装しない。
+
+Cloudflare Dashboardで、Workers Free、Zero Trust Teams Free Base、通常のFree Planだけがactiveであることを2026-08-12に確認した。Workers Paidへupgradeせず、KV、Durable Objects、D1、R2、Queues、Workers AIも使わない。Workers Freeは1日100,000 requestまでで、上限超過後は追加requestが失敗するため従量課金へ移行しない。Cosenseへのsubrequestも課金対象ではなく、1 tool callあたり最大2件、自動retryなしとする。[Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/) [Zero Trust pricing](https://www.cloudflare.com/plans/zero-trust-services/)
 
 ## 調査範囲と根拠
 
@@ -77,17 +79,17 @@ Cosense は公式に、掲載 API を内部 API とし、予告なく変更す�
 
 現行 source は9 toolを持つ。[tool registration](https://github.com/worldnine/scrapbox-cosense-mcp/blob/d4f649f3c18383d748cbda73b9181c59c0f2d8ce/src/index.ts#L160-L398)
 
-| tool                | 種別  | endpoint / 処理                               |                    SIDなし |
-| ------------------- | ----- | --------------------------------------------- | -------------------------: |
-| `get_page`          | read  | `GET /api/pages/{project}/{title}`            |              public を想定 |
-| `list_pages`        | read  | list GET 後、各 page を detail GETする N+1    |              public を想定 |
-| `search_pages`      | read  | `GET /api/pages/{project}/search/query?q=...` |              public を想定 |
-| `get_smart_context` | read  | `GET /api/smart-context/export-{1             | 2}hop-links/{project}.txt` | 不可 |
-| `get_page_url`      | local | URL生成のみ                                   |                         可 |
-| `create_page`       | write | WebSocket patch。URL-only modeもある          |                writeは不可 |
-| `insert_lines`      | write | WebSocket patch                               |                       不可 |
-| `edit_lines`        | write | WebSocket patch                               |                       不可 |
-| `delete_page`       | write | opt-in登録後、全行削除 patch                  |                       不可 |
+| tool                | 種別  | endpoint / 処理                                              |       SIDなし |
+| ------------------- | ----- | ------------------------------------------------------------ | ------------: |
+| `get_page`          | read  | `GET /api/pages/{project}/{title}`                           | public を想定 |
+| `list_pages`        | read  | list GET 後、各 page を detail GETする N+1                   | public を想定 |
+| `search_pages`      | read  | `GET /api/pages/{project}/search/query?q=...`                | public を想定 |
+| `get_smart_context` | read  | `GET /api/smart-context/export-{1,2}hop-links/{project}.txt` |          不可 |
+| `get_page_url`      | local | URL生成のみ                                                  |            可 |
+| `create_page`       | write | WebSocket patch。URL-only modeもある                         |   writeは不可 |
+| `insert_lines`      | write | WebSocket patch                                              |          不可 |
+| `edit_lines`        | write | WebSocket patch                                              |          不可 |
+| `delete_page`       | write | opt-in登録後、全行削除 patch                                 |          不可 |
 
 GET 系は `COSENSE_SID` が存在するときだけ `Cookie: connect.sid=...` を付け、未設定なら Cookie header 自体を送らない。[page/list/search implementation](https://github.com/worldnine/scrapbox-cosense-mcp/blob/d4f649f3c18383d748cbda73b9181c59c0f2d8ce/src/cosense.ts#L97-L156) [Smart Context](https://github.com/worldnine/scrapbox-cosense-mcp/blob/d4f649f3c18383d748cbda73b9181c59c0f2d8ce/src/cosense.ts#L457-L490)
 
@@ -194,17 +196,17 @@ UIのQuick Searchは、先頭5件のQuick Search、vector、残りのQuick Searc
 
 ### Related / 1-hop / 2-hop / Smart Context
 
-| 機能          | 内容                                             | endpoint                                                          |             匿名 |
-| ------------- | ------------------------------------------------ | ----------------------------------------------------------------- | ---------------: |
-| 1-hop         | 直接link・backlink関係                           | Page v2 `/links1hop`                                              |               可 |
-| 2-hop         | 共通HeadWord等を介した関連。直接1-hopは含めない  | Page v2 `/links2hop`                                              |               可 |
-| hop内検索     | hop集合を `search`、任意で `op=or` により絞る    | 同上 query                                                        |               可 |
-| relation      | outgoing / incoming / bidirectional              | endpoint fieldではなく、base pageと候補の `linksLc` からCLIが計算 |               可 |
-| Smart Context | 関連する複数page本文を1つのplain-text fileに集約 | `/api/smart-context/export-{1                                     | 2}hop-links/...` | 不可 |
+| 機能          | 内容                                             | endpoint                                                          | 匿名 |
+| ------------- | ------------------------------------------------ | ----------------------------------------------------------------- | ---: |
+| 1-hop         | 直接link・backlink関係                           | Page v2 `/links1hop`                                              |   可 |
+| 2-hop         | 共通HeadWord等を介した関連。直接1-hopは含めない  | Page v2 `/links2hop`                                              |   可 |
+| hop内検索     | hop集合を `search`、任意で `op=or` により絞る    | 同上 query                                                        |   可 |
+| relation      | outgoing / incoming / bidirectional              | endpoint fieldではなく、base pageと候補の `linksLc` からCLIが計算 |   可 |
+| Smart Context | 関連する複数page本文を1つのplain-text fileに集約 | `/api/smart-context/export-{1,2}hop-links/...`                    | 不可 |
 
 hop responseのpaginationは `{perPage,total,hasNext,nextId}`、既定 `perPage=1000` である。次pageは `nextId` と `perPage` をqueryに渡すことを、2026-08-12の公式Web client asset `assets-20260810-073323` で確認した。[official web bundle](https://scrapbox.io/assets/chunks/chunk-BZ7AQD4N.js)
 
-v1の `get_related_pages` は一覧を文脈候補として返し、本文は返さない。上位候補を取得後に `get_page` を使う。起点pageも取得して1-hopのrelationを計算する。大量列挙ではなく選択が目的なので、toolの `limit` は最大20とし、upstreamへ同じ値を `perPage` として渡す。`hasNext` がtrueなら `nextId` をopaque cursorとして返し、次callの `cursor` で続きから取得する。これにより21–1000件目をlocal sliceで飛ばさない。
+v1の `get_related_pages` は一覧を文脈候補として返し、本文は返さない。上位候補を取得後に `get_page` を使う。起点pageも取得して1-hopのrelationを計算する。大量列挙ではなく選択が目的なので、toolの `limit` は最大20とし、upstreamへ同じ値を `perPage` として渡す。受信した候補にも同じ上限を適用する。`hasNext` がtrueなら `nextId` をopaqueな `nextCursor` として返し、次callの `cursor` で続きから取得する。
 
 Smart Contextは1 requestで大量本文を取れる利点があるが、次の理由で採用しない。
 
@@ -371,7 +373,7 @@ projectはsource定数 `shiyui` とし、tool引数にprojectやURLを持たせ�
 }
 ```
 
-`hop` は `1 | 2`。queryと `cursor` は任意、matchは `and | or`、limitは1–20。`limit` はupstreamの `perPage` に渡し、cursorは直前のresponseの `nextId` だけを受け付ける。1-hopでは起点pageも取得し、`outgoing | incoming | bidirectional` を計算する。2-hopはrelationを付けない。
+`hop` は `1 | 2`。queryと `cursor` は任意、matchは `and | or`、limitは1–20。title、query、cursorは最大500文字。`limit` はupstreamの `perPage` と受信候補のlocal上限に使う。続きがある場合はresponseの `nextCursor` を次callの `cursor` に渡し、Workerはopaque stringとしてupstreamの `nextId` へ転送する。1-hopでは起点pageも取得し、`outgoing | incoming | bidirectional` を計算する。2-hopはrelationを付けない。
 
 出力は候補の `title`、短いdescriptions、relation、`pageRank`、`linked`、`updatedAt`、canonical URL、upstream paginationの `total`、`hasNext`、`nextCursor`。page本文は返さない。
 
@@ -446,6 +448,10 @@ Managed OAuthはAccess edgeをOAuth authorization serverにする。Protected Re
 
 Access for SaaSのGeneric OIDC applicationは使用しない。Self-hosted Access applicationでWorkerの公開hostnameを保護し、Managed OAuthとDCRを有効にする。Access policyはIncludeを本人のemail 1件にし、identity providerはOne-time PINだけを利用可能にする。
 
+Preview URLは使用せず、`wrangler.jsonc` とCloudflare上で無効にする。Managed OAuthのlocalhost clientとloopback clientも使用しない。
+
+2026-08-12にCloudflare上でも、全identity providerの自動許可を無効にしてOne-time PINだけを選択し、localhost clientとloopback clientを無効にした。DCRのredirect URIはChatGPT管理画面の正確なcallback URIを確認できるまで `https://chatgpt.com/connector/oauth/*` を維持し、推測した値へ置き換えない。
+
 ### Origin assertion
 
 Managed OAuthのclient bearerはopaqueであり、Workerでdecodeしない。Access edgeが認証後に付与する `Cf-Access-Jwt-Assertion` を、team domainのJWKSで検証する。
@@ -467,6 +473,7 @@ Managed OAuthのclient bearerはopaqueであり、Workerでdecodeしない。Acc
 - allowlist済みpath builder以外をfetchしない。
 - HTTP methodはGETだけ。write endpoint文字列、WebSocket dependency、edit operationをsourceに置かない。
 - Workerの公開hostname全体をAccess applicationで保護する。
+- Preview URLは使用せず、`wrangler.jsonc` とCloudflare上で無効にする。
 - Worker入口で `Cf-Access-Jwt-Assertion` を検証し、欠落・不正・期限切れは403にする。
 - 未認証clientへの401とOAuth discoveryはAccess edgeに委譲する。
 - custom scopeとtool内の重複認可は実装しない。
@@ -495,20 +502,20 @@ Managed OAuthのclient bearerはopaqueであり、Workerでdecodeしない。Acc
 | protocol         | MCP Inspectorでdiscovery/list/call、current headers、JSON response、`resultType` / cache hintsを確認 |
 | ChatGPT          | Developer modeからOne-time PIN、tool discovery、read callを確認                                      |
 
-deploy前に `pnpm check` と `wrangler deploy --dry-run` を通す。別環境のPoCは作らず、deploy後の最初のChatGPT接続を実利用確認にする。ChatGPTのcallback URIはapp管理画面に表示された値をDCR allowlistへ登録する。
+deploy前に `pnpm check` と `pnpm exec wrangler deploy --dry-run` を通す。別環境のPoCは作らず、deploy後の最初のChatGPT接続を実利用確認にする。ChatGPTのcallback URIはapp管理画面に表示された値をDCR allowlistへ登録する。
 
 ## Maintenance risk
 
-| risk                         | 影響                           | 対応                                                                                 |
-| ---------------------------- | ------------------------------ | ------------------------------------------------------------------------------------ |
-| Cosense内部APIの予告なし変更 | field/path/queryが壊れる       | endpointを4系統に限定、used fieldだけ検証、明確に失敗、公式CLI/releaseを更新時に確認 |
-| vector/full-text index遅延   | 検索直後に新pageが出ない       | 候補選択後は必ずPages v2。SLAを約束しない                                            |
-| response上限の変更           | 検索候補が欠落                 | observed valueを仕様化せず、returned/truncatedを返す                                 |
-| related pagination変更       | 続きの候補が取れない           | `perPage=limit`、`hasNext/nextId`をopaque cursorとして往復                           |
-| rate limit非公開             | 429や一時失敗                  | 1 call 1–2 request、N+1回避。429を明示し、無制限retryしない                          |
-| OAuth / MCPの変更            | ChatGPT接続が壊れる            | Cloudflare Accessとcurrent SDKへ委譲し、独自互換layerを足さない                      |
-| Access設定の誤り             | 認証またはWorker到達が失敗する | exact email policy、team domain、Application Audienceを確認                          |
-| ChatGPT protocol revision差  | discovery/call不成立           | 実利用で確認し、観測した問題だけを直す                                               |
+| risk                         | 影響                                     | 対応                                                                                 |
+| ---------------------------- | ---------------------------------------- | ------------------------------------------------------------------------------------ |
+| Cosense内部APIの予告なし変更 | field/path/queryが壊れる                 | endpointを4系統に限定、used fieldだけ検証、明確に失敗、公式CLI/releaseを更新時に確認 |
+| vector/full-text index遅延   | 検索直後に新pageが出ない                 | 候補選択後は必ずPages v2。SLAを約束しない                                            |
+| response上限の変更           | 検索候補が欠落                           | observed valueを仕様化せず、returned/truncatedを返す                                 |
+| related pagination変更       | 続きの候補が取れない                     | `perPage=limit`、`hasNext/nextId`をopaque cursorとして往復                           |
+| rate limit非公開             | 429や一時失敗                            | 1 call 1–2 request、N+1回避。429を明示し、無制限retryしない                          |
+| OAuth / MCPの変更            | ChatGPT接続が壊れる                      | Cloudflare Accessとcurrent SDKへ委譲し、独自互換layerを足さない                      |
+| Access設定の誤り             | 意図しない利用者への公開、または接続失敗 | exact email 1件、One-time PINのみ、team domain、Application Audienceを確認           |
+| ChatGPT protocol revision差  | discovery/call不成立                     | 実利用で確認し、観測した問題だけを直す                                               |
 
 ## 確定した設計
 

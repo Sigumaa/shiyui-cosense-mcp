@@ -23,8 +23,8 @@ project、origin、URL、HTTP header、credential、file pathはtool引数に含
 
 - Node.js 24.11以上
 - pnpm 11.16.0
-- Cloudflare account
-- Cloudflare Zero Trust account
+- Cloudflare Workers Free plan
+- Cloudflare Zero Trust Free plan
 - One-time PINを受信するemail address 1件
 
 ## Install
@@ -43,7 +43,9 @@ pnpm check
 3. Allow policyのIncludeを本人のemail 1件にし、利用可能なidentity providerをOne-time PINだけにする。
 4. applicationでManaged OAuthとDynamic Client Registrationを有効にする。
 5. DCRのredirect URIにChatGPT管理画面で表示されたcallback URIを登録する。
-6. Application Audience tagとteam domainを `wrangler.jsonc` に設定する。
+6. localhost clientとloopback clientを無効にする。
+7. Application Audience tagとteam domainを `wrangler.jsonc` に設定する。
+8. Preview URLは使用しない。`wrangler.jsonc` で `preview_urls: false` を明示し、Cloudflare上でも無効になっていることを確認する。
 
 ```json
 {
@@ -56,6 +58,13 @@ pnpm check
 
 Access for SaaS application、OIDC client ID / secret、Worker callback、custom scopeは使用しない。
 
+## 課金
+
+- Workers FreeとZero Trust Freeだけを使用し、有料planへupgradeしない
+- KV、Durable Objects、D1、R2、Queues、Workers AIは使用しない
+- 1 tool callあたりのCosense requestは最大2件で、自動retryは行わない
+- Workers Freeの1日100,000 requestを超えた場合は処理が失敗し、従量課金には移行しない
+
 ## Deploy
 
 ```sh
@@ -63,7 +72,7 @@ pnpm exec wrangler login
 pnpm exec wrangler whoami
 pnpm check
 pnpm exec wrangler deploy --dry-run
-pnpm deploy
+pnpm run deploy
 ```
 
 ChatGPT Developer modeへ次を登録する。

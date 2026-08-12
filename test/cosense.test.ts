@@ -41,6 +41,7 @@ function createFixtureFetch(...fixtures: JsonFixture[]): {
 function expectAnonymousJsonGet(call: FetchCall): void {
   expect(call.init?.method).toBe("GET");
   expect(call.init?.cache).toBe("no-store");
+  expect(call.init?.signal).toBeDefined();
   expect(call.init).not.toHaveProperty("credentials");
   const headers = new Headers(call.init?.headers);
   expect(headers.get("accept")).toBe("application/json");
@@ -198,6 +199,58 @@ describe("request errors", () => {
       message: "Cosense returned an invalid vector search response.",
     });
   });
+
+  it("combines caller cancellation with a fixed upstream timeout", async () => {
+    const timeoutSignal = new AbortController().signal;
+    const timeoutSpy = vi
+      .spyOn(AbortSignal, "timeout")
+      .mockReturnValue(timeoutSignal);
+    const caller = new AbortController();
+    let resolveSignal: ((signal: AbortSignal) => void) | undefined;
+    const capturedSignal = new Promise<AbortSignal>((resolve) => {
+      resolveSignal = resolve;
+    });
+    const fetcher: typeof fetch = async (_input, init) => {
+      const requestSignal = init?.signal;
+      if (!requestSignal) throw new Error("Missing request signal");
+      resolveSignal?.(requestSignal);
+      return new Promise<Response>((_resolve, reject) => {
+        requestSignal.addEventListener("abort", () => {
+          reject(requestSignal.reason);
+        });
+      });
+    };
+
+    const promise = createCosenseClient(fetcher).searchVector(
+      { query: "query" },
+      caller.signal,
+    );
+
+    const requestSignal = await capturedSignal;
+    expect(timeoutSpy).toHaveBeenCalledWith(15_000);
+    expect(requestSignal).not.toBe(caller.signal);
+    expect(requestSignal.aborted).toBe(false);
+    caller.abort();
+
+    await expect(promise).rejects.toMatchObject({ name: "AbortError" });
+    expect(requestSignal.aborted).toBe(true);
+    timeoutSpy.mockRestore();
+  });
+
+  it("rejects oversized direct-client input before fetching", async () => {
+    const fetcher: typeof fetch = vi.fn();
+    const client = createCosenseClient(fetcher);
+    const oversized = "日".repeat(501);
+
+    await expect(client.getPage({ title: oversized })).rejects.toThrow();
+    await expect(client.searchFullText({ query: oversized })).rejects.toThrow();
+    await expect(client.searchVector({ query: oversized })).rejects.toThrow();
+    await expect(
+      client.getRelatedPages({ title: "page", hop: 2, cursor: oversized }),
+    ).rejects.toThrow();
+
+    expect(fetcher).not.toHaveBeenCalled();
+  });
 });
 
 describe("searchFullText", () => {
@@ -331,6 +384,32 @@ describe("searchVector", () => {
 });
 
 describe("getRelatedPages", () => {
+  it("cancels both 1-hop requests when the caller aborts", async () => {
+    const caller = new AbortController();
+    const requestSignals: AbortSignal[] = [];
+    const fetcher: typeof fetch = async (_input, init) => {
+      const requestSignal = init?.signal;
+      if (!requestSignal) throw new Error("Missing request signal");
+      requestSignals.push(requestSignal);
+      return new Promise<Response>((_resolve, reject) => {
+        requestSignal.addEventListener("abort", () => {
+          reject(requestSignal.reason);
+        });
+      });
+    };
+
+    const promise = createCosenseClient(fetcher).getRelatedPages(
+      { title: "Base Page", hop: 1 },
+      caller.signal,
+    );
+
+    expect(requestSignals).toHaveLength(2);
+    caller.abort();
+
+    await expect(promise).rejects.toMatchObject({ name: "AbortError" });
+    expect(requestSignals.every((signal) => signal.aborted)).toBe(true);
+  });
+
   it("calculates all 1-hop relation variants from normalized link fields", async () => {
     const { fetcher, calls } = createFixtureFetch(
       {
@@ -450,6 +529,31 @@ describe("getRelatedPages", () => {
     ).rejects.toBeInstanceOf(CosenseUpstreamError);
   });
 
+  it("omits relation when the base page has no link fields", async () => {
+    const { fetcher } = createFixtureFetch(
+      { body: { title: "Base Page" } },
+      {
+        body: {
+          links1hop: [
+            {
+              title: "Candidate",
+              titleLc: "candidate",
+              linksLc: ["base_page"],
+            },
+          ],
+          pagination: { hasNext: false },
+        },
+      },
+    );
+
+    const result = await createCosenseClient(fetcher).getRelatedPages({
+      title: "Base Page",
+      hop: 1,
+    });
+
+    expect(result.results[0]).not.toHaveProperty("relation");
+  });
+
   it("builds the complete 2-hop search URL and never adds relation", async () => {
     const { fetcher, calls } = createFixtureFetch({
       body: {
@@ -497,6 +601,84 @@ describe("getRelatedPages", () => {
     });
     expect(result.results[0]).not.toHaveProperty("relation");
     expect(result).not.toHaveProperty("nextCursor");
+  });
+
+  it("enforces the local limit when related endpoints return too many pages", async () => {
+    const relatedPages = ["first", "second", "third"].map((title) => ({
+      title,
+    }));
+    const { fetcher } = createFixtureFetch({
+      body: {
+        links2hop: relatedPages,
+        pagination: { total: 3, hasNext: true, nextId: "next" },
+      },
+    });
+
+    const result = await createCosenseClient(fetcher).getRelatedPages({
+      title: "page",
+      hop: 2,
+      limit: 2,
+    });
+
+    expect(result).toMatchObject({
+      total: 3,
+      hasNext: true,
+      nextCursor: "next",
+      returned: 2,
+    });
+    expect(result.results.map(({ title }) => title)).toEqual([
+      "first",
+      "second",
+    ]);
+  });
+
+  it("enforces the local limit for 1-hop results too", async () => {
+    const { fetcher } = createFixtureFetch(
+      { body: { title: "Base", links: [] } },
+      {
+        body: {
+          links1hop: ["first", "second", "third"].map((title) => ({
+            title,
+            titleLc: title,
+            linksLc: [],
+          })),
+          pagination: { total: 3, hasNext: false },
+        },
+      },
+    );
+
+    const result = await createCosenseClient(fetcher).getRelatedPages({
+      title: "Base",
+      hop: 1,
+      limit: 2,
+    });
+
+    expect(result.returned).toBe(2);
+    expect(result.results.map(({ title }) => title)).toEqual([
+      "first",
+      "second",
+    ]);
+  });
+
+  it("keeps the longest accepted related URL below the Worker limit", async () => {
+    const { fetcher, calls } = createFixtureFetch({
+      body: {
+        links2hop: [],
+        pagination: { hasNext: false },
+      },
+    });
+    const value = "日".repeat(500);
+
+    await createCosenseClient(fetcher).getRelatedPages({
+      title: value,
+      hop: 2,
+      query: value,
+      cursor: value,
+    });
+
+    expect(new TextEncoder().encode(calls[0]?.url).byteLength).toBeLessThan(
+      16 * 1_024,
+    );
   });
 
   it("rejects pagination that advertises a next page without a cursor", async () => {

@@ -3,10 +3,15 @@ import { z } from "zod";
 const ORIGIN = "https://scrapbox.io";
 const PROJECT = "shiyui";
 const DEFAULT_LIMIT = 10;
+const MAX_INPUT_LENGTH = 500;
+const REQUEST_TIMEOUT_MS = 15_000;
 
-const nonBlankString = z.string().refine((value) => value.trim().length > 0, {
-  message: "Must not be blank",
-});
+const nonBlankString = z
+  .string()
+  .max(MAX_INPUT_LENGTH)
+  .refine((value) => value.trim().length > 0, {
+    message: "Must not be blank",
+  });
 const pageTitleSchema = nonBlankString.refine(
   (value) => value.trim() !== "." && value.trim() !== "..",
   { message: "Dot-segment titles are not supported" },
@@ -42,7 +47,7 @@ const getRelatedPagesInputSchema = z
     query: nonBlankString.optional(),
     match: z.enum(["and", "or"]).optional().default("and"),
     limit: limitSchema.optional().default(DEFAULT_LIMIT),
-    cursor: z.string().min(1).optional(),
+    cursor: z.string().min(1).max(MAX_INPUT_LENGTH).optional(),
   })
   .strict();
 
@@ -265,10 +270,19 @@ export class CosenseResponseError extends Error {
 }
 
 export interface CosenseClient {
-  getPage(input: GetPageInput): Promise<GetPageResult>;
-  searchFullText(input: SearchFullTextInput): Promise<SearchFullTextResult>;
-  searchVector(input: SearchVectorInput): Promise<SearchVectorResult>;
-  getRelatedPages(input: GetRelatedPagesInput): Promise<GetRelatedPagesResult>;
+  getPage(input: GetPageInput, signal?: AbortSignal): Promise<GetPageResult>;
+  searchFullText(
+    input: SearchFullTextInput,
+    signal?: AbortSignal,
+  ): Promise<SearchFullTextResult>;
+  searchVector(
+    input: SearchVectorInput,
+    signal?: AbortSignal,
+  ): Promise<SearchVectorResult>;
+  getRelatedPages(
+    input: GetRelatedPagesInput,
+    signal?: AbortSignal,
+  ): Promise<GetRelatedPagesResult>;
 }
 
 type Fetcher = typeof fetch;
@@ -304,11 +318,18 @@ async function requestJson<T>(
   url: string,
   operation: string,
   schema: z.ZodType<T>,
+  signal?: AbortSignal,
 ): Promise<T> {
+  const timeoutSignal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+  const requestSignal =
+    signal === undefined
+      ? timeoutSignal
+      : AbortSignal.any([signal, timeoutSignal]);
   const response = await fetcher(url, {
     method: "GET",
     cache: "no-store",
     headers: { Accept: "application/json" },
+    signal: requestSignal,
   });
 
   if (!response.ok) {
@@ -318,6 +339,7 @@ async function requestJson<T>(
   try {
     return schema.parse(await response.json());
   } catch (error) {
+    if (requestSignal.aborted) throw requestSignal.reason;
     throw new CosenseResponseError(operation, error);
   }
 }
@@ -342,12 +364,13 @@ function computeRelation(
   baseTitleLc: string,
   baseLinksLc: Set<string>,
   page: z.infer<typeof oneHopPageSchema>,
-): RelatedPageRelation {
+): RelatedPageRelation | undefined {
   const outgoing = baseLinksLc.has(page.titleLc);
   const incoming = page.linksLc.includes(baseTitleLc);
   if (outgoing && incoming) return "bidirectional";
   if (outgoing) return "outgoing";
-  return "incoming";
+  if (incoming) return "incoming";
+  return undefined;
 }
 
 function mapRelatedPage(
@@ -384,7 +407,7 @@ export function createCosenseClient(
   fetcher: Fetcher = globalThis.fetch,
 ): CosenseClient {
   return {
-    async getPage(input) {
+    async getPage(input, signal) {
       const { title } = getPageInputSchema.parse(input);
       let page: z.infer<typeof pageResponseSchema>;
       try {
@@ -393,6 +416,7 @@ export function createCosenseClient(
           apiUrl(pagePath(title)),
           "page",
           pageResponseSchema,
+          signal,
         );
       } catch (error) {
         if (error instanceof CosenseUpstreamError && error.status === 404) {
@@ -435,7 +459,7 @@ export function createCosenseClient(
       };
     },
 
-    async searchFullText(input) {
+    async searchFullText(input, signal) {
       const parsed = searchFullTextInputSchema.parse(input);
       const params = new URLSearchParams();
       params.set("q", parsed.query);
@@ -447,6 +471,7 @@ export function createCosenseClient(
         apiUrl(`/api/pages/${PROJECT}/search/query`, params),
         "full-text search",
         fullTextResponseSchema,
+        signal,
       );
       const selected = response.pages.slice(0, parsed.limit);
       const results = selected.map((page): FullTextSearchResultItem => ({
@@ -471,7 +496,7 @@ export function createCosenseClient(
       };
     },
 
-    async searchVector(input) {
+    async searchVector(input, signal) {
       const parsed = searchVectorInputSchema.parse(input);
       const params = new URLSearchParams();
       params.set("q", parsed.query);
@@ -480,6 +505,7 @@ export function createCosenseClient(
         apiUrl(`/api/pages/${PROJECT}/search/vector/titles`, params),
         "vector search",
         vectorResponseSchema,
+        signal,
       );
       const selected = response.pages.slice(0, parsed.limit);
       const results = selected.map((page): VectorSearchResultItem => ({
@@ -500,7 +526,7 @@ export function createCosenseClient(
       };
     },
 
-    async getRelatedPages(input) {
+    async getRelatedPages(input, signal) {
       const parsed = getRelatedPagesInputSchema.parse(input);
       const relatedUrl = makeRelatedUrl(parsed);
 
@@ -510,9 +536,12 @@ export function createCosenseClient(
           relatedUrl,
           "2-hop related pages",
           twoHopResponseSchema,
+          signal,
         );
         return buildRelatedResult(
-          response.links2hop.map((page) => mapRelatedPage(page)),
+          response.links2hop
+            .slice(0, parsed.limit)
+            .map((page) => mapRelatedPage(page)),
           response.pagination,
         );
       }
@@ -523,27 +552,29 @@ export function createCosenseClient(
           apiUrl(pagePath(parsed.title)),
           "relation base page",
           relationBasePageSchema,
+          signal,
         ),
         requestJson(
           fetcher,
           relatedUrl,
           "1-hop related pages",
           oneHopResponseSchema,
+          signal,
         ),
       ]);
 
       if (relatedResult.status === "rejected") throw relatedResult.reason;
 
       let baseTitleLc: string;
-      let baseLinksLc: Set<string>;
+      let baseLinksLc: Set<string> | undefined;
       if (baseResult.status === "fulfilled") {
         baseTitleLc = normalizeTitle(
           baseResult.value.titleLc ?? baseResult.value.title ?? parsed.title,
         );
-        baseLinksLc = new Set(
+        const linksLc =
           baseResult.value.linksLc ??
-            (baseResult.value.links ?? []).map(normalizeTitle),
-        );
+          baseResult.value.links?.map(normalizeTitle);
+        baseLinksLc = linksLc === undefined ? undefined : new Set(linksLc);
       } else if (
         baseResult.reason instanceof CosenseUpstreamError &&
         baseResult.reason.status === 404
@@ -554,32 +585,17 @@ export function createCosenseClient(
         throw baseResult.reason;
       }
 
-      const results = relatedResult.value.links1hop.map((page) =>
-        mapRelatedPage(page, computeRelation(baseTitleLc, baseLinksLc, page)),
-      );
+      const results = relatedResult.value.links1hop
+        .slice(0, parsed.limit)
+        .map((page) =>
+          mapRelatedPage(
+            page,
+            baseLinksLc === undefined
+              ? undefined
+              : computeRelation(baseTitleLc, baseLinksLc, page),
+          ),
+        );
       return buildRelatedResult(results, relatedResult.value.pagination);
     },
   };
-}
-
-export function getPage(input: GetPageInput): Promise<GetPageResult> {
-  return createCosenseClient().getPage(input);
-}
-
-export function searchFullText(
-  input: SearchFullTextInput,
-): Promise<SearchFullTextResult> {
-  return createCosenseClient().searchFullText(input);
-}
-
-export function searchVector(
-  input: SearchVectorInput,
-): Promise<SearchVectorResult> {
-  return createCosenseClient().searchVector(input);
-}
-
-export function getRelatedPages(
-  input: GetRelatedPagesInput,
-): Promise<GetRelatedPagesResult> {
-  return createCosenseClient().getRelatedPages(input);
 }
