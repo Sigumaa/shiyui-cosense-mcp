@@ -10,6 +10,7 @@ export default defineConfig({
         bindings: {
           TEAM_DOMAIN: "https://team.cloudflareaccess.com",
           POLICY_AUD: "access-application-audience",
+          COSENSE_PAT: "test-only-cosense-pat",
         },
       },
     }),

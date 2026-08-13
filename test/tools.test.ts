@@ -1,7 +1,7 @@
 import { createMcpHandler, type StatelessMcpHandler } from "agents/mcp/server";
 import { describe, expect, it, vi } from "vitest";
 
-import type { CosenseClient } from "../src/cosense";
+import { CosenseAuthenticationError, type CosenseClient } from "../src/cosense";
 import { createCosenseMcpServer } from "../src/tools";
 
 const MODERN_PROTOCOL_VERSION = "2026-07-28";
@@ -235,5 +235,24 @@ describe("createCosenseMcpServer", () => {
 
     expect(response.result).toMatchObject({ isError: true });
     expect(client.getPage).not.toHaveBeenCalled();
+  });
+
+  it("returns a safe authentication failure without an HTTP status", async () => {
+    const client = createStubClient();
+    vi.mocked(client.getPage).mockRejectedValue(
+      new CosenseAuthenticationError(401, "page"),
+    );
+
+    const response = await modernRequest(createHandler(client), "tools/call", {
+      name: "get_page",
+      arguments: { title: "private page" },
+    });
+
+    expect(response.result).toMatchObject({
+      resultType: "complete",
+      isError: true,
+      content: [{ type: "text", text: "Cosense authentication failed." }],
+    });
+    expect(JSON.stringify(response)).not.toContain("401");
   });
 });

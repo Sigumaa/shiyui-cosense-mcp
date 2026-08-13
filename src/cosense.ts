@@ -259,6 +259,18 @@ export class CosenseUpstreamError extends Error {
   }
 }
 
+export class CosenseAuthenticationError extends Error {
+  readonly status: 401 | 403;
+  readonly operation: string;
+
+  constructor(status: 401 | 403, operation: string) {
+    super("Cosense authentication failed.");
+    this.name = "CosenseAuthenticationError";
+    this.status = status;
+    this.operation = operation;
+  }
+}
+
 export class CosenseResponseError extends Error {
   readonly operation: string;
 
@@ -315,6 +327,7 @@ function optionalTime(timestamp: number | undefined): object {
 
 async function requestJson<T>(
   fetcher: Fetcher,
+  personalAccessToken: string,
   url: string,
   operation: string,
   schema: z.ZodType<T>,
@@ -328,11 +341,17 @@ async function requestJson<T>(
   const response = await fetcher(url, {
     method: "GET",
     cache: "no-store",
-    headers: { Accept: "application/json" },
+    headers: {
+      Accept: "application/json",
+      "x-personal-access-token": personalAccessToken,
+    },
     signal: requestSignal,
   });
 
   if (!response.ok) {
+    if (response.status === 401 || response.status === 403) {
+      throw new CosenseAuthenticationError(response.status, operation);
+    }
     throw new CosenseUpstreamError(response.status, operation);
   }
 
@@ -404,8 +423,16 @@ function buildRelatedResult(
 }
 
 export function createCosenseClient(
+  personalAccessToken: string,
   fetcher: Fetcher = globalThis.fetch,
 ): CosenseClient {
+  if (
+    typeof personalAccessToken !== "string" ||
+    personalAccessToken.trim() === ""
+  ) {
+    throw new Error("Cosense Personal Access Token is required.");
+  }
+
   return {
     async getPage(input, signal) {
       const { title } = getPageInputSchema.parse(input);
@@ -413,6 +440,7 @@ export function createCosenseClient(
       try {
         page = await requestJson(
           fetcher,
+          personalAccessToken,
           apiUrl(pagePath(title)),
           "page",
           pageResponseSchema,
@@ -468,6 +496,7 @@ export function createCosenseClient(
 
       const response = await requestJson(
         fetcher,
+        personalAccessToken,
         apiUrl(`/api/pages/${PROJECT}/search/query`, params),
         "full-text search",
         fullTextResponseSchema,
@@ -502,6 +531,7 @@ export function createCosenseClient(
       params.set("q", parsed.query);
       const response = await requestJson(
         fetcher,
+        personalAccessToken,
         apiUrl(`/api/pages/${PROJECT}/search/vector/titles`, params),
         "vector search",
         vectorResponseSchema,
@@ -533,6 +563,7 @@ export function createCosenseClient(
       if (parsed.hop === 2) {
         const response = await requestJson(
           fetcher,
+          personalAccessToken,
           relatedUrl,
           "2-hop related pages",
           twoHopResponseSchema,
@@ -549,6 +580,7 @@ export function createCosenseClient(
       const [baseResult, relatedResult] = await Promise.allSettled([
         requestJson(
           fetcher,
+          personalAccessToken,
           apiUrl(pagePath(parsed.title)),
           "relation base page",
           relationBasePageSchema,
@@ -556,6 +588,7 @@ export function createCosenseClient(
         ),
         requestJson(
           fetcher,
+          personalAccessToken,
           relatedUrl,
           "1-hop related pages",
           oneHopResponseSchema,

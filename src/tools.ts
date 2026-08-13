@@ -6,9 +6,9 @@ import {
 import { z } from "zod";
 
 import {
+  CosenseAuthenticationError,
   CosenseResponseError,
   CosenseUpstreamError,
-  createCosenseClient,
   type CosenseClient,
 } from "./cosense";
 
@@ -103,7 +103,9 @@ function success(value: object, summary: string): CallToolResult {
 
 function failure(error: unknown): CallToolResult {
   let message = "Cosense request failed.";
-  if (error instanceof CosenseResponseError) {
+  if (error instanceof CosenseAuthenticationError) {
+    message = "Cosense authentication failed.";
+  } else if (error instanceof CosenseResponseError) {
     message = "Cosense returned an unexpected response.";
   } else if (error instanceof CosenseUpstreamError) {
     if (error.status === 429) {
@@ -123,7 +125,7 @@ function failure(error: unknown): CallToolResult {
 
 export function createCosenseMcpServer(
   _requestContext: McpRequestContext,
-  client: CosenseClient = createCosenseClient(),
+  client: CosenseClient,
 ): McpServer {
   const server = new McpServer(
     { name: "shiyui-cosense-mcp", version: "0.1.0" },
@@ -140,7 +142,7 @@ export function createCosenseMcpServer(
     {
       title: "Get Cosense page",
       description:
-        "Read one page from the fixed public Cosense project. Returns the page body without author data or line IDs.",
+        "Read one page from the fixed Cosense project. Returns the page body without author data or line IDs.",
       inputSchema: z.object({ title: titleSchema }),
       outputSchema: getPageOutputSchema,
       annotations,
@@ -213,7 +215,7 @@ export function createCosenseMcpServer(
     {
       title: "Get related Cosense pages",
       description:
-        "List 1-hop or 2-hop candidate pages from the fixed public Cosense project. Returns metadata and pagination, not current page bodies; call get_page for selected titles.",
+        "List 1-hop or 2-hop candidate pages from the fixed Cosense project. Returns metadata and pagination, not current page bodies; call get_page for selected titles.",
       inputSchema: z.object({
         title: titleSchema,
         hop: z.union([z.literal(1), z.literal(2)]).default(1),

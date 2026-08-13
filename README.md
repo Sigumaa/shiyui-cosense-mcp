@@ -2,11 +2,12 @@
 
 `https://scrapbox.io/shiyui` 専用の read-only Remote MCP Server。
 
-- Cosense は公開 internal API へ匿名 GET
-- MCP は Cloudflare Access Managed OAuth で保護
-- Access policy は許可 email 1件 + One-time PIN
-- Worker は `Cf-Access-Jwt-Assertion` の署名、issuer、audience、有効期限を検証
-- KV、OAuth secret、Cosense credential、本文 cache は使用しない
+- Cosense Personal Access Token（PAT）を必須とし、Cloudflare Secret `COSENSE_PAT` に保存
+- `shiyui` 固定の全GETへ `x-personal-access-token` を送信
+- PATが未設定または空ならCosenseへ接続せず失敗
+- Public / Private pageを同じ認証経路で取得
+- MCPはCloudflare Access Managed OAuthで保護
+- 4つのread-only toolだけを公開し、write、任意project、任意URL、cacheは持たない
 
 ## Tools
 
@@ -25,6 +26,7 @@ project、origin、URL、HTTP header、credential、file pathはtool引数に含
 - pnpm 11.16.0
 - Cloudflare Workers Free plan
 - Cloudflare Zero Trust Free plan
+- Cosense Personal Access Token
 - One-time PINを受信するemail address 1件
 
 ## Install
@@ -35,6 +37,28 @@ pnpm check
 ```
 
 `pnpm-workspace.yaml` はdependencyのminimum release ageを7日に設定する。
+
+## Cosense PAT
+
+PATは `https://scrapbox.io/settings/personal-access-tokens` で発行する。README、`wrangler.jsonc`、example file、Gitには保存しない。
+
+localでは、Git管理外の `.dev.vars` を作成して実値を設定する。
+
+```sh
+cp .dev.vars.example .dev.vars
+```
+
+```dotenv
+COSENSE_PAT=replace-with-personal-access-token
+```
+
+CloudflareにはSecretとして登録する。
+
+```sh
+npx wrangler secret put COSENSE_PAT
+```
+
+PATが未設定または空の場合はfail closedとし、匿名requestへfallbackしない。Cosenseが `401` または `403` を返した場合は認証失敗として扱い、PAT、upstream response body、statusごとの意味をclientへ返さない。
 
 ## Cloudflare Access
 
@@ -86,10 +110,11 @@ https://<worker-origin>/mcp
 ## Data boundary
 
 - Cosense requestは `GET` と `cache: "no-store"` だけを使用
+- 全Cosense GETへ `x-personal-access-token` を付与し、Public / Privateで分岐しない
 - MCP responseも `Cache-Control: no-store`
 - responseにpage author、email、line ID、raw API responseを含めない
-- upstream error bodyをtool resultへ含めない
-- OAuth token、Access assertion、page本文、queryをlogしない
-- Cosense internal APIは予告なく変更される可能性がある
+- PAT、OAuth token、Access assertion、page本文、queryをlogしない
+- `401` / `403` はtokenとupstream bodyを含まない認証失敗として返す
+- Cosense internal APIとPAT headerの利用方法は予告なく変更される可能性がある
 
 調査根拠と非採用機能は [docs/research.md](docs/research.md) を参照する。

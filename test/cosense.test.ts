@@ -1,10 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  CosenseAuthenticationError,
   CosenseResponseError,
   CosenseUpstreamError,
   createCosenseClient,
 } from "../src/cosense";
+
+const TEST_PERSONAL_ACCESS_TOKEN = "test-only-cosense-pat-do-not-log-7bf3a921";
 
 interface FetchCall {
   url: string;
@@ -23,7 +26,9 @@ function createFixtureFetch(...fixtures: JsonFixture[]): {
   const calls: FetchCall[] = [];
   let fixtureIndex = 0;
   const fetcher: typeof fetch = async (input, init) => {
-    calls.push({ url: String(input), init });
+    const call = { url: String(input), init };
+    calls.push(call);
+    expectAuthenticatedJsonGet(call);
     const fixture = fixtures[fixtureIndex];
     fixtureIndex += 1;
     if (!fixture) throw new Error("Unexpected fetch call");
@@ -38,7 +43,7 @@ function createFixtureFetch(...fixtures: JsonFixture[]): {
   return { fetcher, calls };
 }
 
-function expectAnonymousJsonGet(call: FetchCall): void {
+function expectAuthenticatedJsonGet(call: FetchCall): void {
   expect(call.init?.method).toBe("GET");
   expect(call.init?.cache).toBe("no-store");
   expect(call.init?.signal).toBeDefined();
@@ -47,7 +52,9 @@ function expectAnonymousJsonGet(call: FetchCall): void {
   expect(headers.get("accept")).toBe("application/json");
   expect(headers.has("authorization")).toBe(false);
   expect(headers.has("cookie")).toBe(false);
-  expect(headers.has("x-personal-access-token")).toBe(false);
+  expect(headers.get("x-personal-access-token")).toBe(
+    TEST_PERSONAL_ACCESS_TOKEN,
+  );
   expect(headers.has("x-service-account-access-key")).toBe(false);
 }
 
@@ -73,15 +80,16 @@ describe("getPage", () => {
       },
     });
 
-    const result = await createCosenseClient(fetcher).getPage({
-      title: "日本語 /%?#",
-    });
+    const result = await createCosenseClient(
+      TEST_PERSONAL_ACCESS_TOKEN,
+      fetcher,
+    ).getPage({ title: "日本語 /%?#" });
 
     expect(calls).toHaveLength(1);
     expect(calls[0]?.url).toBe(
       "https://scrapbox.io/api/pages/v2/shiyui/%E6%97%A5%E6%9C%AC%E8%AA%9E%20%2F%25%3F%23",
     );
-    expectAnonymousJsonGet(calls[0] as FetchCall);
+    expectAuthenticatedJsonGet(calls[0] as FetchCall);
     expect(result).toEqual({
       exists: true,
       title: "日本語 /%?#",
@@ -111,7 +119,9 @@ describe("getPage", () => {
     });
 
     await expect(
-      createCosenseClient(fetcher).getPage({ title: "not created" }),
+      createCosenseClient(TEST_PERSONAL_ACCESS_TOKEN, fetcher).getPage({
+        title: "not created",
+      }),
     ).resolves.toEqual({
       exists: false,
       title: "not created",
@@ -123,7 +133,9 @@ describe("getPage", () => {
     const { fetcher } = createFixtureFetch({ status: 404 });
 
     await expect(
-      createCosenseClient(fetcher).getPage({ title: "not linked" }),
+      createCosenseClient(TEST_PERSONAL_ACCESS_TOKEN, fetcher).getPage({
+        title: "not linked",
+      }),
     ).resolves.toEqual({
       exists: false,
       title: "not linked",
@@ -135,7 +147,9 @@ describe("getPage", () => {
     const { fetcher, calls } = createFixtureFetch();
 
     await expect(
-      createCosenseClient(fetcher).getPage({ title: " \n " }),
+      createCosenseClient(TEST_PERSONAL_ACCESS_TOKEN, fetcher).getPage({
+        title: " \n ",
+      }),
     ).rejects.toThrow("Must not be blank");
     expect(calls).toHaveLength(0);
   });
@@ -144,7 +158,9 @@ describe("getPage", () => {
     const { fetcher, calls } = createFixtureFetch();
 
     await expect(
-      createCosenseClient(fetcher).getPage({ title: ".." }),
+      createCosenseClient(TEST_PERSONAL_ACCESS_TOKEN, fetcher).getPage({
+        title: "..",
+      }),
     ).rejects.toThrow("Dot-segment titles are not supported");
     expect(calls).toHaveLength(0);
   });
@@ -159,20 +175,82 @@ describe("getPage", () => {
     });
 
     await expect(
-      createCosenseClient(fetcher).getPage({ title: "broken" }),
+      createCosenseClient(TEST_PERSONAL_ACCESS_TOKEN, fetcher).getPage({
+        title: "broken",
+      }),
     ).rejects.toBeInstanceOf(CosenseResponseError);
   });
 });
 
 describe("request errors", () => {
+  it.each([undefined, "", " \n "])(
+    "rejects a missing or blank personal access token before fetching",
+    (personalAccessToken) => {
+      const fetcher: typeof fetch = vi.fn();
+
+      expect(() =>
+        createCosenseClient(personalAccessToken as string, fetcher),
+      ).toThrow("Cosense Personal Access Token is required.");
+      expect(fetcher).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([401, 403])(
+    "reports HTTP %i as a safe authentication error",
+    async (status) => {
+      const upstreamBody = `upstream authentication details: ${TEST_PERSONAL_ACCESS_TOKEN}`;
+      const response = new Response(upstreamBody, { status });
+      const jsonSpy = vi.spyOn(response, "json");
+      const textSpy = vi.spyOn(response, "text");
+      const calls: FetchCall[] = [];
+      const fetcher: typeof fetch = async (input, init) => {
+        const call = { url: String(input), init };
+        calls.push(call);
+        expectAuthenticatedJsonGet(call);
+        return response;
+      };
+
+      const error = await createCosenseClient(
+        TEST_PERSONAL_ACCESS_TOKEN,
+        fetcher,
+      )
+        .searchFullText({ query: "private query" })
+        .then(
+          () => undefined,
+          (reason: unknown) => reason,
+        );
+
+      expect(error).toBeInstanceOf(CosenseAuthenticationError);
+      expect(error).toMatchObject({
+        name: "CosenseAuthenticationError",
+        status,
+        operation: "full-text search",
+        message: "Cosense authentication failed.",
+      });
+      expect(calls).toHaveLength(1);
+      expect(String(error)).not.toContain(upstreamBody);
+      expect(String(error)).not.toContain(TEST_PERSONAL_ACCESS_TOKEN);
+      expect(JSON.stringify(error)).not.toContain(upstreamBody);
+      expect(JSON.stringify(error)).not.toContain(TEST_PERSONAL_ACCESS_TOKEN);
+      expect(jsonSpy).not.toHaveBeenCalled();
+      expect(textSpy).not.toHaveBeenCalled();
+      expect(response.bodyUsed).toBe(false);
+    },
+  );
+
   it("does not read or expose a non-2xx response body", async () => {
     const response = new Response("secret upstream details", { status: 429 });
     const jsonSpy = vi.spyOn(response, "json");
-    const fetcher: typeof fetch = async () => response;
+    const textSpy = vi.spyOn(response, "text");
+    const fetcher: typeof fetch = async (input, init) => {
+      expectAuthenticatedJsonGet({ url: String(input), init });
+      return response;
+    };
 
-    const promise = createCosenseClient(fetcher).searchFullText({
-      query: "private query",
-    });
+    const promise = createCosenseClient(
+      TEST_PERSONAL_ACCESS_TOKEN,
+      fetcher,
+    ).searchFullText({ query: "private query" });
 
     await expect(promise).rejects.toMatchObject({
       name: "CosenseUpstreamError",
@@ -182,17 +260,23 @@ describe("request errors", () => {
     });
     await expect(promise).rejects.not.toThrow("secret upstream details");
     expect(jsonSpy).not.toHaveBeenCalled();
+    expect(textSpy).not.toHaveBeenCalled();
+    expect(response.bodyUsed).toBe(false);
   });
 
   it("wraps malformed JSON as a response error", async () => {
-    const fetcher: typeof fetch = async () =>
-      new Response("not json", {
+    const fetcher: typeof fetch = async (input, init) => {
+      expectAuthenticatedJsonGet({ url: String(input), init });
+      return new Response("not json", {
         status: 200,
         headers: { "Content-Type": "application/json" },
       });
+    };
 
     await expect(
-      createCosenseClient(fetcher).searchVector({ query: "query" }),
+      createCosenseClient(TEST_PERSONAL_ACCESS_TOKEN, fetcher).searchVector({
+        query: "query",
+      }),
     ).rejects.toMatchObject({
       name: "CosenseResponseError",
       operation: "vector search",
@@ -211,6 +295,7 @@ describe("request errors", () => {
       resolveSignal = resolve;
     });
     const fetcher: typeof fetch = async (_input, init) => {
+      expectAuthenticatedJsonGet({ url: String(_input), init });
       const requestSignal = init?.signal;
       if (!requestSignal) throw new Error("Missing request signal");
       resolveSignal?.(requestSignal);
@@ -221,10 +306,10 @@ describe("request errors", () => {
       });
     };
 
-    const promise = createCosenseClient(fetcher).searchVector(
-      { query: "query" },
-      caller.signal,
-    );
+    const promise = createCosenseClient(
+      TEST_PERSONAL_ACCESS_TOKEN,
+      fetcher,
+    ).searchVector({ query: "query" }, caller.signal);
 
     const requestSignal = await capturedSignal;
     expect(timeoutSpy).toHaveBeenCalledWith(15_000);
@@ -239,7 +324,7 @@ describe("request errors", () => {
 
   it("rejects oversized direct-client input before fetching", async () => {
     const fetcher: typeof fetch = vi.fn();
-    const client = createCosenseClient(fetcher);
+    const client = createCosenseClient(TEST_PERSONAL_ACCESS_TOKEN, fetcher);
     const oversized = "日".repeat(501);
 
     await expect(client.getPage({ title: oversized })).rejects.toThrow();
@@ -282,7 +367,10 @@ describe("searchFullText", () => {
       },
     });
 
-    const result = await createCosenseClient(fetcher).searchFullText({
+    const result = await createCosenseClient(
+      TEST_PERSONAL_ACCESS_TOKEN,
+      fetcher,
+    ).searchFullText({
       query: "検索 /%?#",
       match: "or",
       sort: "updated",
@@ -292,7 +380,7 @@ describe("searchFullText", () => {
     expect(calls[0]?.url).toBe(
       "https://scrapbox.io/api/pages/shiyui/search/query?q=%E6%A4%9C%E7%B4%A2+%2F%25%3F%23&op=or&sort=updated",
     );
-    expectAnonymousJsonGet(calls[0] as FetchCall);
+    expectAuthenticatedJsonGet(calls[0] as FetchCall);
     expect(result).toEqual({
       reportedCount: 25,
       exactTitleMatch: true,
@@ -320,9 +408,10 @@ describe("searchFullText", () => {
   it("omits op for AND matching and uses the default sort", async () => {
     const { fetcher, calls } = createFixtureFetch({ body: { pages: [] } });
 
-    await createCosenseClient(fetcher).searchFullText({
-      query: "alpha beta",
-    });
+    await createCosenseClient(
+      TEST_PERSONAL_ACCESS_TOKEN,
+      fetcher,
+    ).searchFullText({ query: "alpha beta" });
 
     expect(calls[0]?.url).toBe(
       "https://scrapbox.io/api/pages/shiyui/search/query?q=alpha+beta&sort=pageRank",
@@ -349,7 +438,10 @@ describe("searchVector", () => {
       },
     });
 
-    const result = await createCosenseClient(fetcher).searchVector({
+    const result = await createCosenseClient(
+      TEST_PERSONAL_ACCESS_TOKEN,
+      fetcher,
+    ).searchVector({
       query: "意味 /%?#",
       limit: 2,
     });
@@ -360,6 +452,7 @@ describe("searchVector", () => {
     expect(new URL(calls[0]?.url as string).searchParams.has("limit")).toBe(
       false,
     );
+    expectAuthenticatedJsonGet(calls[0] as FetchCall);
     expect(result).toEqual({
       returned: 2,
       localTruncated: true,
@@ -387,7 +480,8 @@ describe("getRelatedPages", () => {
   it("cancels both 1-hop requests when the caller aborts", async () => {
     const caller = new AbortController();
     const requestSignals: AbortSignal[] = [];
-    const fetcher: typeof fetch = async (_input, init) => {
+    const fetcher: typeof fetch = async (input, init) => {
+      expectAuthenticatedJsonGet({ url: String(input), init });
       const requestSignal = init?.signal;
       if (!requestSignal) throw new Error("Missing request signal");
       requestSignals.push(requestSignal);
@@ -398,10 +492,10 @@ describe("getRelatedPages", () => {
       });
     };
 
-    const promise = createCosenseClient(fetcher).getRelatedPages(
-      { title: "Base Page", hop: 1 },
-      caller.signal,
-    );
+    const promise = createCosenseClient(
+      TEST_PERSONAL_ACCESS_TOKEN,
+      fetcher,
+    ).getRelatedPages({ title: "Base Page", hop: 1 }, caller.signal);
 
     expect(requestSignals).toHaveLength(2);
     caller.abort();
@@ -451,17 +545,16 @@ describe("getRelatedPages", () => {
       },
     );
 
-    const result = await createCosenseClient(fetcher).getRelatedPages({
-      title: "Base Page",
-      hop: 1,
-      limit: 3,
-    });
+    const result = await createCosenseClient(
+      TEST_PERSONAL_ACCESS_TOKEN,
+      fetcher,
+    ).getRelatedPages({ title: "Base Page", hop: 1, limit: 3 });
 
     expect(calls.map(({ url }) => url)).toEqual([
       "https://scrapbox.io/api/pages/v2/shiyui/Base%20Page",
       "https://scrapbox.io/api/pages/v2/shiyui/Base%20Page/links1hop?perPage=3",
     ]);
-    for (const call of calls) expectAnonymousJsonGet(call);
+    for (const call of calls) expectAuthenticatedJsonGet(call);
     expect(result).toEqual({
       total: 9,
       hasNext: true,
@@ -507,10 +600,10 @@ describe("getRelatedPages", () => {
       },
     );
 
-    const result = await createCosenseClient(fetcher).getRelatedPages({
-      title: "Base Page",
-      hop: 1,
-    });
+    const result = await createCosenseClient(
+      TEST_PERSONAL_ACCESS_TOKEN,
+      fetcher,
+    ).getRelatedPages({ title: "Base Page", hop: 1 });
 
     expect(result.results[0]?.relation).toBe("incoming");
   });
@@ -522,7 +615,7 @@ describe("getRelatedPages", () => {
     );
 
     await expect(
-      createCosenseClient(fetcher).getRelatedPages({
+      createCosenseClient(TEST_PERSONAL_ACCESS_TOKEN, fetcher).getRelatedPages({
         title: "Base Page",
         hop: 1,
       }),
@@ -546,10 +639,10 @@ describe("getRelatedPages", () => {
       },
     );
 
-    const result = await createCosenseClient(fetcher).getRelatedPages({
-      title: "Base Page",
-      hop: 1,
-    });
+    const result = await createCosenseClient(
+      TEST_PERSONAL_ACCESS_TOKEN,
+      fetcher,
+    ).getRelatedPages({ title: "Base Page", hop: 1 });
 
     expect(result.results[0]).not.toHaveProperty("relation");
   });
@@ -571,7 +664,10 @@ describe("getRelatedPages", () => {
       },
     });
 
-    const result = await createCosenseClient(fetcher).getRelatedPages({
+    const result = await createCosenseClient(
+      TEST_PERSONAL_ACCESS_TOKEN,
+      fetcher,
+    ).getRelatedPages({
       title: "日本語 /%?#",
       hop: 2,
       query: "検索 /%?#",
@@ -584,6 +680,7 @@ describe("getRelatedPages", () => {
     expect(calls[0]?.url).toBe(
       "https://scrapbox.io/api/pages/v2/shiyui/%E6%97%A5%E6%9C%AC%E8%AA%9E%20%2F%25%3F%23/links2hop?perPage=7&search=%E6%A4%9C%E7%B4%A2+%2F%25%3F%23&op=or&nextId=cursor+%2F%25%3F%23",
     );
+    expectAuthenticatedJsonGet(calls[0] as FetchCall);
     expect(result).toEqual({
       total: 1,
       hasNext: false,
@@ -614,11 +711,10 @@ describe("getRelatedPages", () => {
       },
     });
 
-    const result = await createCosenseClient(fetcher).getRelatedPages({
-      title: "page",
-      hop: 2,
-      limit: 2,
-    });
+    const result = await createCosenseClient(
+      TEST_PERSONAL_ACCESS_TOKEN,
+      fetcher,
+    ).getRelatedPages({ title: "page", hop: 2, limit: 2 });
 
     expect(result).toMatchObject({
       total: 3,
@@ -647,11 +743,10 @@ describe("getRelatedPages", () => {
       },
     );
 
-    const result = await createCosenseClient(fetcher).getRelatedPages({
-      title: "Base",
-      hop: 1,
-      limit: 2,
-    });
+    const result = await createCosenseClient(
+      TEST_PERSONAL_ACCESS_TOKEN,
+      fetcher,
+    ).getRelatedPages({ title: "Base", hop: 1, limit: 2 });
 
     expect(result.returned).toBe(2);
     expect(result.results.map(({ title }) => title)).toEqual([
@@ -669,12 +764,10 @@ describe("getRelatedPages", () => {
     });
     const value = "日".repeat(500);
 
-    await createCosenseClient(fetcher).getRelatedPages({
-      title: value,
-      hop: 2,
-      query: value,
-      cursor: value,
-    });
+    await createCosenseClient(
+      TEST_PERSONAL_ACCESS_TOKEN,
+      fetcher,
+    ).getRelatedPages({ title: value, hop: 2, query: value, cursor: value });
 
     expect(new TextEncoder().encode(calls[0]?.url).byteLength).toBeLessThan(
       16 * 1_024,
@@ -690,7 +783,10 @@ describe("getRelatedPages", () => {
     });
 
     await expect(
-      createCosenseClient(fetcher).getRelatedPages({ title: "page", hop: 2 }),
+      createCosenseClient(TEST_PERSONAL_ACCESS_TOKEN, fetcher).getRelatedPages({
+        title: "page",
+        hop: 2,
+      }),
     ).rejects.toBeInstanceOf(CosenseResponseError);
   });
 });

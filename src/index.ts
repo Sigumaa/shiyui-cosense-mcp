@@ -1,14 +1,15 @@
 import { createMcpHandler } from "agents/mcp/server";
 
 import { verifyAccessRequest } from "./access";
+import { createCosenseClient } from "./cosense";
 import type { Env } from "./env";
 import { createCosenseMcpServer } from "./tools";
 
-const mcpHandler = createMcpHandler(createCosenseMcpServer, {
+const mcpHandlerOptions = {
   route: "/mcp",
   legacy: "reject",
   corsOptions: false,
-});
+} as const;
 
 function noStore(response: Response): Response {
   const headers = new Headers(response.headers);
@@ -32,7 +33,7 @@ function textResponse(body: string, status: 403 | 500): Response {
   });
 }
 
-const worker: ExportedHandler<Env> = {
+export const worker: ExportedHandler<Env> = {
   async fetch(request, env, context) {
     try {
       await verifyAccessRequest(request, env);
@@ -41,6 +42,11 @@ const worker: ExportedHandler<Env> = {
     }
 
     try {
+      const client = createCosenseClient(env.COSENSE_PAT);
+      const mcpHandler = createMcpHandler(
+        (requestContext) => createCosenseMcpServer(requestContext, client),
+        mcpHandlerOptions,
+      );
       return noStore(await mcpHandler(request, env, context));
     } catch {
       return textResponse("Server error", 500);

@@ -2,10 +2,14 @@ import { exports } from "cloudflare:workers";
 import { SignJWT, exportJWK, generateKeyPair } from "jose";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
+import type { Env } from "../src/env";
+import { worker } from "../src/index";
+
 const TEAM_DOMAIN = "https://team.cloudflareaccess.com";
 const POLICY_AUD = "access-application-audience";
 const KEY_ID = "test-key";
 const MODERN_PROTOCOL_VERSION = "2026-07-28";
+const TEST_PERSONAL_ACCESS_TOKEN = "test-only-cosense-pat";
 const workerBinding = (exports as unknown as { default: Fetcher }).default;
 
 let signingKey: CryptoKey;
@@ -85,6 +89,91 @@ function toolsListRequest(assertion?: string): Request {
   });
 }
 
+function getPageRequest(assertion: string): Request {
+  return new Request("https://mcp.example.com/mcp", {
+    method: "POST",
+    headers: {
+      Accept: "application/json, text/event-stream",
+      "Cf-Access-Jwt-Assertion": assertion,
+      "Content-Type": "application/json",
+      "Mcp-Method": "tools/call",
+      "Mcp-Name": "get_page",
+      "MCP-Protocol-Version": MODERN_PROTOCOL_VERSION,
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: {
+        name: "get_page",
+        arguments: { title: "private page" },
+        _meta: {
+          "io.modelcontextprotocol/protocolVersion": MODERN_PROTOCOL_VERSION,
+          "io.modelcontextprotocol/clientCapabilities": {},
+        },
+      },
+    }),
+  });
+}
+
+function mockJwksAndCosense(): {
+  cosenseCalls: Array<{
+    cache: string | undefined;
+    headers: Headers;
+    method: string | undefined;
+    url: string;
+  }>;
+} {
+  const cosenseCalls: Array<{
+    cache: string | undefined;
+    headers: Headers;
+    method: string | undefined;
+    url: string;
+  }> = [];
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const url = String(input);
+    if (url === `${TEAM_DOMAIN}/cdn-cgi/access/certs`) {
+      return Response.json(jwks);
+    }
+    if (url.startsWith("https://scrapbox.io/")) {
+      cosenseCalls.push({
+        url,
+        method: init?.method,
+        cache: init?.cache,
+        headers: new Headers(init?.headers),
+      });
+      return Response.json({
+        persistent: true,
+        title: "private page",
+        id: "page-id",
+        commitId: "commit-id",
+        lines: [{ text: "private page" }, { text: "private body" }],
+      });
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
+  });
+  return { cosenseCalls };
+}
+
+async function fetchWorkerWithPat(
+  request: Request,
+  personalAccessToken?: string,
+): Promise<Response> {
+  const env = {
+    TEAM_DOMAIN,
+    POLICY_AUD,
+    ...(personalAccessToken === undefined
+      ? {}
+      : { COSENSE_PAT: personalAccessToken }),
+  } as Env;
+  const fetch = worker.fetch as unknown as (
+    request: Request,
+    env: Env,
+    context: ExecutionContext,
+  ) => Promise<Response>;
+  return fetch(request, env, {} as ExecutionContext);
+}
+
 describe("Access-protected MCP Worker", () => {
   it("rejects a request without an Access assertion", async () => {
     const externalFetch = vi.spyOn(globalThis, "fetch");
@@ -114,6 +203,57 @@ describe("Access-protected MCP Worker", () => {
       "get_related_pages",
     ]);
   });
+
+  it("uses the configured personal access token for a tool call", async () => {
+    const { cosenseCalls } = mockJwksAndCosense();
+    const response = await workerBinding.fetch(
+      getPageRequest(await createAssertion()),
+    );
+    const body = (await response.json()) as {
+      result?: { structuredContent?: Record<string, unknown> };
+    };
+
+    expect(response.status).toBe(200);
+    expectNoStore(response);
+    expect(body.result?.structuredContent).toMatchObject({
+      exists: true,
+      title: "private page",
+      text: "private body",
+    });
+    expect(cosenseCalls).toHaveLength(1);
+    expect(cosenseCalls[0]?.url).toBe(
+      "https://scrapbox.io/api/pages/v2/shiyui/private%20page",
+    );
+    const headers = cosenseCalls[0]?.headers as Headers;
+    expect(cosenseCalls[0]?.method).toBe("GET");
+    expect(cosenseCalls[0]?.cache).toBe("no-store");
+    expect(headers.get("accept")).toBe("application/json");
+    expect(headers.get("x-personal-access-token")).toBe(
+      TEST_PERSONAL_ACCESS_TOKEN,
+    );
+    expect(headers.has("authorization")).toBe(false);
+    expect(headers.has("cookie")).toBe(false);
+    expect(headers.has("x-service-account-access-key")).toBe(false);
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["blank", " \n "],
+  ])(
+    "fails safely when COSENSE_PAT is %s",
+    async (_case, personalAccessToken) => {
+      const { cosenseCalls } = mockJwksAndCosense();
+      const response = await fetchWorkerWithPat(
+        getPageRequest(await createAssertion()),
+        personalAccessToken,
+      );
+
+      expect(response.status).toBe(500);
+      expectNoStore(response);
+      expect(await response.text()).toBe("Server error");
+      expect(cosenseCalls).toHaveLength(0);
+    },
+  );
 
   it("rejects an assertion for another Access application", async () => {
     mockJwks();
