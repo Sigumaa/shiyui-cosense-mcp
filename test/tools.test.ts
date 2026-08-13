@@ -148,6 +148,15 @@ describe("createCosenseMcpServer", () => {
       "list_pages",
       "get_page_changes",
     ]);
+    expect(
+      result.tools.find(({ name }) => name === "list_pages")?.description,
+    ).toContain("pinned pages first");
+    expect(
+      result.tools.find(({ name }) => name === "list_pages")?.description,
+    ).toContain("reported total page count");
+    expect(
+      result.tools.find(({ name }) => name === "get_page_changes")?.description,
+    ).toContain("do not call for routine page reads");
 
     const expectedProperties = {
       get_page: ["title"],

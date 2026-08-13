@@ -310,7 +310,7 @@ export function createCosenseMcpServer(
     {
       title: "List Cosense pages",
       description:
-        "List one bounded page of metadata from the fixed Cosense project, without fetching page bodies. Use get_page to read a selected page. Additional pages are fetched only when called again with nextSkip as skip.",
+        "List one bounded page of metadata from the fixed Cosense project, without fetching page bodies. Cosense always places pinned pages first, so sort does not define a pure global order. reportedCount is Cosense's reported total page count, not a per-call limit. Use get_page to read a selected page. Additional pages are fetched only when called again with nextSkip as skip.",
       inputSchema: z.object({
         sort: z
           .enum(["updated", "created", "accessed", "linked", "views", "title"])
@@ -341,7 +341,7 @@ export function createCosenseMcpServer(
     {
       title: "Get Cosense page changes",
       description:
-        "Return at most the latest 50 explainable changes for one page in the fixed Cosense project. Pass pageId and optionally commitId from get_page to return only later changes. Actor names are resolved with one project-users request; no other pages or histories are fetched.",
+        "Use only when the user asks about edit history, how a page changed, or differences since an earlier commitId; do not call for routine page reads. Return at most the latest 50 explainable changes for one page in the fixed Cosense project. Pass pageId and optionally commitId from get_page to return only later changes. Actor names are resolved with one project-users request; no other pages or histories are fetched.",
       inputSchema: z.object({
         pageId: pageIdSchema,
         commitId: commitIdSchema.optional(),
