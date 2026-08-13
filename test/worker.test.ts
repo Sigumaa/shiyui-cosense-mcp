@@ -89,7 +89,11 @@ function toolsListRequest(assertion?: string): Request {
   });
 }
 
-function getPageRequest(assertion: string): Request {
+function toolCallRequest(
+  assertion: string,
+  name: string,
+  args: Record<string, unknown>,
+): Request {
   return new Request("https://mcp.example.com/mcp", {
     method: "POST",
     headers: {
@@ -97,7 +101,7 @@ function getPageRequest(assertion: string): Request {
       "Cf-Access-Jwt-Assertion": assertion,
       "Content-Type": "application/json",
       "Mcp-Method": "tools/call",
-      "Mcp-Name": "get_page",
+      "Mcp-Name": name,
       "MCP-Protocol-Version": MODERN_PROTOCOL_VERSION,
     },
     body: JSON.stringify({
@@ -105,8 +109,8 @@ function getPageRequest(assertion: string): Request {
       id: 1,
       method: "tools/call",
       params: {
-        name: "get_page",
-        arguments: { title: "private page" },
+        name,
+        arguments: args,
         _meta: {
           "io.modelcontextprotocol/protocolVersion": MODERN_PROTOCOL_VERSION,
           "io.modelcontextprotocol/clientCapabilities": {},
@@ -116,7 +120,27 @@ function getPageRequest(assertion: string): Request {
   });
 }
 
-function mockJwksAndCosense(): {
+function getPageRequest(assertion: string): Request {
+  return toolCallRequest(assertion, "get_page", { title: "private page" });
+}
+
+function listPagesRequest(assertion: string): Request {
+  return toolCallRequest(assertion, "list_pages", {
+    sort: "updated",
+    limit: 2,
+    skip: 3,
+  });
+}
+
+function mockJwksAndCosense(
+  cosenseResponse: unknown = {
+    persistent: true,
+    title: "private page",
+    id: "page-id",
+    commitId: "commit-id",
+    lines: [{ text: "private page" }, { text: "private body" }],
+  },
+): {
   cosenseCalls: Array<{
     cache: string | undefined;
     headers: Headers;
@@ -142,13 +166,7 @@ function mockJwksAndCosense(): {
         cache: init?.cache,
         headers: new Headers(init?.headers),
       });
-      return Response.json({
-        persistent: true,
-        title: "private page",
-        id: "page-id",
-        commitId: "commit-id",
-        lines: [{ text: "private page" }, { text: "private body" }],
-      });
+      return Response.json(cosenseResponse);
     }
     throw new Error(`Unexpected fetch: ${url}`);
   });
@@ -201,6 +219,8 @@ describe("Access-protected MCP Worker", () => {
       "search_full_text",
       "search_vector",
       "get_related_pages",
+      "list_pages",
+      "get_page_changes",
     ]);
   });
 
@@ -234,6 +254,60 @@ describe("Access-protected MCP Worker", () => {
     expect(headers.has("authorization")).toBe(false);
     expect(headers.has("cookie")).toBe(false);
     expect(headers.has("x-service-account-access-key")).toBe(false);
+  });
+
+  it("lists pages with one authenticated Cosense request and no detail fetches", async () => {
+    const { cosenseCalls } = mockJwksAndCosense({
+      projectName: "shiyui",
+      count: 8,
+      limit: 2,
+      skip: 3,
+      pages: [
+        {
+          id: "recent-page-id",
+          title: "recent page",
+          descriptions: ["recent description"],
+          updated: 1_700_000_000,
+        },
+        {
+          id: "older-page-id",
+          title: "older page",
+          descriptions: [],
+          updated: 1_699_999_000,
+        },
+      ],
+    });
+    const response = await workerBinding.fetch(
+      listPagesRequest(await createAssertion()),
+    );
+    const body = (await response.json()) as {
+      result?: { structuredContent?: Record<string, unknown> };
+    };
+
+    expect(response.status).toBe(200);
+    expectNoStore(response);
+    expect(body.result?.structuredContent).toMatchObject({
+      reportedCount: 8,
+      skip: 3,
+      returned: 2,
+      hasNext: true,
+      nextSkip: 5,
+      results: [
+        { pageId: "recent-page-id", title: "recent page" },
+        { pageId: "older-page-id", title: "older page" },
+      ],
+    });
+    expect(cosenseCalls).toHaveLength(1);
+    expect(cosenseCalls[0]?.url).toBe(
+      "https://scrapbox.io/api/pages/shiyui/?sort=updated&limit=2&skip=3",
+    );
+    const headers = cosenseCalls[0]?.headers as Headers;
+    expect(cosenseCalls[0]?.method).toBe("GET");
+    expect(cosenseCalls[0]?.cache).toBe("no-store");
+    expect(headers.get("accept")).toBe("application/json");
+    expect(headers.get("x-personal-access-token")).toBe(
+      TEST_PERSONAL_ACCESS_TOKEN,
+    );
   });
 
   it.each([

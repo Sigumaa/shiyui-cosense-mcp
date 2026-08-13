@@ -790,3 +790,263 @@ describe("getRelatedPages", () => {
     ).rejects.toBeInstanceOf(CosenseResponseError);
   });
 });
+
+describe("listPages", () => {
+  it("returns compact metadata with explicit offset pagination in one request", async () => {
+    const { fetcher, calls } = createFixtureFetch({
+      body: {
+        projectName: "shiyui",
+        count: 8,
+        limit: 2,
+        skip: 3,
+        pages: [
+          {
+            id: "page-id-1",
+            title: "first / page",
+            descriptions: ["description", "x".repeat(300)],
+            pin: 1,
+            views: 2,
+            linked: 3,
+            linesCount: 4,
+            charsCount: 5,
+            created: 1,
+            updated: 2,
+            accessed: 3,
+            user: { id: "must-not-leak", email: "must-not-leak@example.com" },
+          },
+          {
+            id: "page-id-2",
+            title: "second",
+          },
+        ],
+      },
+    });
+
+    const result = await createCosenseClient(
+      TEST_PERSONAL_ACCESS_TOKEN,
+      fetcher,
+    ).listPages({ sort: "title", limit: 2, skip: 3 });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe(
+      "https://scrapbox.io/api/pages/shiyui/?sort=title&limit=2&skip=3",
+    );
+    expectAuthenticatedJsonGet(calls[0] as FetchCall);
+    expect(result).toEqual({
+      reportedCount: 8,
+      skip: 3,
+      returned: 2,
+      hasNext: true,
+      nextSkip: 5,
+      results: [
+        {
+          pageId: "page-id-1",
+          title: "first / page",
+          canonicalUrl: "https://scrapbox.io/shiyui/first%20%2F%20page",
+          descriptions: ["description", "x".repeat(240)],
+          pin: 1,
+          views: 2,
+          linked: 3,
+          linesCount: 4,
+          charsCount: 5,
+          createdAt: "1970-01-01T00:00:01.000Z",
+          updatedAt: "1970-01-01T00:00:02.000Z",
+          accessedAt: "1970-01-01T00:00:03.000Z",
+        },
+        {
+          pageId: "page-id-2",
+          title: "second",
+          canonicalUrl: "https://scrapbox.io/shiyui/second",
+          descriptions: [],
+        },
+      ],
+    });
+    expect(JSON.stringify(result)).not.toContain("must-not-leak");
+  });
+
+  it("rejects unbounded list inputs before fetching", async () => {
+    const { fetcher, calls } = createFixtureFetch();
+    const client = createCosenseClient(TEST_PERSONAL_ACCESS_TOKEN, fetcher);
+
+    await expect(client.listPages({ limit: 21 })).rejects.toThrow();
+    await expect(client.listPages({ skip: -1 })).rejects.toThrow();
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe("getPageChanges", () => {
+  it("uses the commit cursor, resolves actor names, and omits private identifiers", async () => {
+    const { fetcher, calls } = createFixtureFetch(
+      {
+        body: {
+          commits: [
+            {
+              id: "commit-1",
+              userId: "user-1",
+              created: 1,
+              changes: [
+                { title: "renamed / page" },
+                {
+                  _insert: "line-1",
+                  lines: { id: "line-1", text: "inserted" },
+                },
+                {
+                  _update: "line-2",
+                  lines: { id: "line-2", origText: "old", text: "middle" },
+                },
+              ],
+            },
+            {
+              id: "commit-2",
+              userId: "user-2",
+              created: 2,
+              changes: [
+                {
+                  _update: "line-2",
+                  lines: { id: "line-2", origText: "middle", text: "new" },
+                },
+                {
+                  _delete: "line-3",
+                  lines: { id: "line-3", origText: "deleted" },
+                },
+                { links: ["ignored metadata"] },
+              ],
+            },
+            {
+              id: "commit-3",
+              userId: "service-1",
+              created: 3,
+              changes: [
+                {
+                  _insert: "line-4",
+                  lines: { id: "line-4", text: "automated" },
+                },
+              ],
+            },
+          ],
+        },
+      },
+      {
+        body: {
+          users: [
+            {
+              id: "user-1",
+              displayName: "Alice",
+              email: "must-not-leak@example.com",
+            },
+          ],
+          memberSnapshots: [{ data: { id: "user-2", name: "Bob" } }],
+          serviceAccounts: [{ id: "service-1", usage: "Change bot" }],
+        },
+      },
+    );
+
+    const result = await createCosenseClient(
+      TEST_PERSONAL_ACCESS_TOKEN,
+      fetcher,
+    ).getPageChanges({
+      pageId: "page /%?#",
+      commitId: "head /%?#",
+    });
+
+    expect(calls).toHaveLength(2);
+    expect(calls.map(({ url }) => url)).toEqual([
+      "https://scrapbox.io/api/commits/shiyui/page%20%2F%25%3F%23?head=head+%2F%25%3F%23",
+      "https://scrapbox.io/api/projects/shiyui/users",
+    ]);
+    for (const call of calls) expectAuthenticatedJsonGet(call);
+    expect(result).toEqual({
+      pageId: "page /%?#",
+      afterCommitId: "head /%?#",
+      commitCount: 3,
+      totalChanges: 5,
+      returned: 5,
+      truncated: false,
+      latestCommitId: "commit-3",
+      latestTitleChange: {
+        title: "renamed / page",
+        canonicalUrl: "https://scrapbox.io/shiyui/renamed%20%2F%20page",
+      },
+      changes: [
+        {
+          kind: "title",
+          authors: ["Alice"],
+          createdAt: "1970-01-01T00:00:01.000Z",
+          after: "renamed / page",
+        },
+        {
+          kind: "insert",
+          authors: ["Alice"],
+          createdAt: "1970-01-01T00:00:01.000Z",
+          after: "inserted",
+        },
+        {
+          kind: "update",
+          authors: ["Alice", "Bob"],
+          createdAt: "1970-01-01T00:00:02.000Z",
+          before: "old",
+          after: "new",
+        },
+        {
+          kind: "delete",
+          authors: ["Bob"],
+          createdAt: "1970-01-01T00:00:02.000Z",
+          before: "deleted",
+        },
+        {
+          kind: "insert",
+          authors: ["Change bot (service account)"],
+          createdAt: "1970-01-01T00:00:03.000Z",
+          after: "automated",
+        },
+      ],
+    });
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain("must-not-leak@example.com");
+    expect(serialized).not.toContain("user-1");
+    expect(serialized).not.toContain("line-1");
+  });
+
+  it("bounds returned events and change text without additional requests", async () => {
+    const changes = Array.from({ length: 51 }, (_, index) => ({
+      _insert: `line-${index}`,
+      lines: { id: `line-${index}`, text: `${index}:${"x".repeat(600)}` },
+    }));
+    const { fetcher, calls } = createFixtureFetch(
+      { body: { commits: [{ id: "latest", changes }] } },
+      { body: {} },
+    );
+
+    const result = await createCosenseClient(
+      TEST_PERSONAL_ACCESS_TOKEN,
+      fetcher,
+    ).getPageChanges({ pageId: "page-id" });
+
+    expect(calls).toHaveLength(2);
+    expect(calls.map(({ url }) => url)).toEqual([
+      "https://scrapbox.io/api/commits/shiyui/page-id",
+      "https://scrapbox.io/api/projects/shiyui/users",
+    ]);
+    expect(result).toMatchObject({
+      commitCount: 1,
+      totalChanges: 51,
+      returned: 50,
+      truncated: true,
+      latestCommitId: "latest",
+    });
+    expect(result).not.toHaveProperty("afterCommitId");
+    expect(result.changes[0]?.after?.startsWith("1:")).toBe(true);
+    expect(result.changes[0]?.after).toHaveLength(500);
+  });
+
+  it("rejects invalid page and commit IDs before fetching", async () => {
+    const { fetcher, calls } = createFixtureFetch();
+    const client = createCosenseClient(TEST_PERSONAL_ACCESS_TOKEN, fetcher);
+
+    await expect(client.getPageChanges({ pageId: ".." })).rejects.toThrow();
+    await expect(
+      client.getPageChanges({ pageId: "page-id", commitId: " \n " }),
+    ).rejects.toThrow();
+    expect(calls).toHaveLength(0);
+  });
+});

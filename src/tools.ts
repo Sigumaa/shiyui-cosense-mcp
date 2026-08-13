@@ -29,6 +29,15 @@ const titleSchema = z
 const querySchema = z.string().trim().min(1).max(MAX_INPUT_LENGTH);
 const limitSchema = z.number().int().min(1).max(20).default(10);
 const matchSchema = z.enum(["and", "or"]).default("and");
+const pageIdSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(MAX_INPUT_LENGTH)
+  .refine((pageId) => pageId !== "." && pageId !== "..", {
+    message: "Dot-segment page IDs are not supported",
+  });
+const commitIdSchema = z.string().trim().min(1).max(MAX_INPUT_LENGTH);
 
 const getPageOutputSchema = z.object({
   exists: z.boolean(),
@@ -90,6 +99,55 @@ const relatedPagesOutputSchema = z.object({
       linked: z.number().optional(),
       updatedAt: z.string().optional(),
       canonicalUrl: z.string(),
+    }),
+  ),
+});
+
+const listPagesOutputSchema = z.object({
+  reportedCount: z.number(),
+  skip: z.number(),
+  returned: z.number(),
+  hasNext: z.boolean(),
+  nextSkip: z.number().optional(),
+  results: z.array(
+    z.object({
+      pageId: z.string(),
+      title: z.string(),
+      canonicalUrl: z.string(),
+      descriptions: z.array(z.string()),
+      pin: z.number().optional(),
+      views: z.number().optional(),
+      linked: z.number().optional(),
+      linesCount: z.number().optional(),
+      charsCount: z.number().optional(),
+      createdAt: z.string().optional(),
+      updatedAt: z.string().optional(),
+      accessedAt: z.string().optional(),
+    }),
+  ),
+});
+
+const pageChangesOutputSchema = z.object({
+  pageId: z.string(),
+  afterCommitId: z.string().optional(),
+  commitCount: z.number(),
+  totalChanges: z.number(),
+  returned: z.number(),
+  truncated: z.boolean(),
+  latestCommitId: z.string().optional(),
+  latestTitleChange: z
+    .object({
+      title: z.string(),
+      canonicalUrl: z.string(),
+    })
+    .optional(),
+  changes: z.array(
+    z.object({
+      kind: z.enum(["title", "insert", "update", "delete"]),
+      authors: z.array(z.string()),
+      createdAt: z.string().optional(),
+      before: z.string().optional(),
+      after: z.string().optional(),
     }),
   ),
 });
@@ -241,6 +299,71 @@ export function createCosenseMcpServer(
           context.mcpReq.signal,
         );
         return success(value, `Found ${value.returned} related pages.`);
+      } catch (error) {
+        return failure(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    "list_pages",
+    {
+      title: "List Cosense pages",
+      description:
+        "List one bounded page of metadata from the fixed Cosense project, without fetching page bodies. Use get_page to read a selected page. Additional pages are fetched only when called again with nextSkip as skip.",
+      inputSchema: z.object({
+        sort: z
+          .enum(["updated", "created", "accessed", "linked", "views", "title"])
+          .default("updated"),
+        limit: limitSchema,
+        skip: z
+          .number()
+          .int()
+          .nonnegative()
+          .max(Number.MAX_SAFE_INTEGER)
+          .default(0),
+      }),
+      outputSchema: listPagesOutputSchema,
+      annotations,
+    },
+    async (input, context) => {
+      try {
+        const value = await client.listPages(input, context.mcpReq.signal);
+        return success(value, `Listed ${value.returned} Cosense pages.`);
+      } catch (error) {
+        return failure(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_page_changes",
+    {
+      title: "Get Cosense page changes",
+      description:
+        "Return at most the latest 50 explainable changes for one page in the fixed Cosense project. Pass pageId and optionally commitId from get_page to return only later changes. Actor names are resolved with one project-users request; no other pages or histories are fetched.",
+      inputSchema: z.object({
+        pageId: pageIdSchema,
+        commitId: commitIdSchema.optional(),
+      }),
+      outputSchema: pageChangesOutputSchema,
+      annotations,
+    },
+    async (input, context) => {
+      try {
+        const value = await client.getPageChanges(
+          {
+            pageId: input.pageId,
+            ...(input.commitId === undefined
+              ? {}
+              : { commitId: input.commitId }),
+          },
+          context.mcpReq.signal,
+        );
+        return success(
+          value,
+          `Found ${value.returned} changes across ${value.commitCount} commits.`,
+        );
       } catch (error) {
         return failure(error);
       }

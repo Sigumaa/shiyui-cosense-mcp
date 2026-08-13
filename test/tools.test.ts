@@ -38,6 +38,22 @@ function createStubClient(): CosenseClient {
       returned: 0,
       results: [],
     })),
+    listPages: vi.fn(async ({ skip }) => ({
+      reportedCount: 0,
+      skip: skip ?? 0,
+      returned: 0,
+      hasNext: false,
+      results: [],
+    })),
+    getPageChanges: vi.fn(async ({ pageId, commitId }) => ({
+      pageId,
+      ...(commitId === undefined ? {} : { afterCommitId: commitId }),
+      commitCount: 0,
+      totalChanges: 0,
+      returned: 0,
+      truncated: false,
+      changes: [],
+    })),
   };
 }
 
@@ -95,7 +111,7 @@ async function modernRequest(
 }
 
 describe("createCosenseMcpServer", () => {
-  it("publishes only the four fixed-project read tools with private no-cache metadata", async () => {
+  it("publishes only the six fixed-project read tools with private no-cache metadata", async () => {
     const response = await modernRequest(
       createHandler(createStubClient()),
       "tools/list",
@@ -129,6 +145,8 @@ describe("createCosenseMcpServer", () => {
       "search_full_text",
       "search_vector",
       "get_related_pages",
+      "list_pages",
+      "get_page_changes",
     ]);
 
     const expectedProperties = {
@@ -136,6 +154,8 @@ describe("createCosenseMcpServer", () => {
       search_full_text: ["limit", "match", "query", "sort"],
       search_vector: ["limit", "query"],
       get_related_pages: ["cursor", "hop", "limit", "match", "query", "title"],
+      list_pages: ["limit", "skip", "sort"],
+      get_page_changes: ["commitId", "pageId"],
     };
     const expectedOutputProperties = {
       get_page: [
@@ -166,12 +186,33 @@ describe("createCosenseMcpServer", () => {
         "returned",
         "total",
       ],
+      list_pages: [
+        "hasNext",
+        "nextSkip",
+        "reportedCount",
+        "results",
+        "returned",
+        "skip",
+      ],
+      get_page_changes: [
+        "afterCommitId",
+        "changes",
+        "commitCount",
+        "latestCommitId",
+        "latestTitleChange",
+        "pageId",
+        "returned",
+        "totalChanges",
+        "truncated",
+      ],
     };
     const expectedTitles = {
       get_page: "Get Cosense page",
       search_full_text: "Search Cosense text",
       search_vector: "Search Cosense semantically",
       get_related_pages: "Get related Cosense pages",
+      list_pages: "List Cosense pages",
+      get_page_changes: "Get Cosense page changes",
     };
 
     for (const tool of result.tools) {
@@ -224,6 +265,87 @@ describe("createCosenseMcpServer", () => {
       { title: "test page" },
       expect.any(AbortSignal),
     );
+  });
+
+  it("passes list defaults to one bounded client request", async () => {
+    const client = createStubClient();
+    const response = await modernRequest(createHandler(client), "tools/call", {
+      name: "list_pages",
+      arguments: {},
+    });
+
+    expect(response.error).toBeUndefined();
+    expect(response.result).toMatchObject({
+      resultType: "complete",
+      content: [{ type: "text", text: "Listed 0 Cosense pages." }],
+      structuredContent: {
+        reportedCount: 0,
+        skip: 0,
+        returned: 0,
+        hasNext: false,
+        results: [],
+      },
+    });
+    expect(client.listPages).toHaveBeenCalledOnce();
+    expect(client.listPages).toHaveBeenCalledWith(
+      { sort: "updated", limit: 10, skip: 0 },
+      expect.any(AbortSignal),
+    );
+  });
+
+  it("passes page and optional commit IDs to one change-history request", async () => {
+    const client = createStubClient();
+    const response = await modernRequest(createHandler(client), "tools/call", {
+      name: "get_page_changes",
+      arguments: { pageId: " page-id ", commitId: " commit-id " },
+    });
+
+    expect(response.error).toBeUndefined();
+    expect(response.result).toMatchObject({
+      resultType: "complete",
+      content: [
+        {
+          type: "text",
+          text: "Found 0 changes across 0 commits.",
+        },
+      ],
+      structuredContent: {
+        pageId: "page-id",
+        afterCommitId: "commit-id",
+        commitCount: 0,
+        totalChanges: 0,
+        returned: 0,
+        truncated: false,
+        changes: [],
+      },
+    });
+    expect(client.getPageChanges).toHaveBeenCalledOnce();
+    expect(client.getPageChanges).toHaveBeenCalledWith(
+      { pageId: "page-id", commitId: "commit-id" },
+      expect.any(AbortSignal),
+    );
+  });
+
+  it("rejects unsafe list and change-history inputs before calling Cosense", async () => {
+    const client = createStubClient();
+    const handler = createHandler(client);
+
+    for (const [name, arguments_] of [
+      ["list_pages", { limit: 21 }],
+      ["list_pages", { skip: -1 }],
+      ["list_pages", { skip: Number.MAX_SAFE_INTEGER + 1 }],
+      ["get_page_changes", { pageId: ".." }],
+      ["get_page_changes", { pageId: "page-id", commitId: " " }],
+    ] as const) {
+      const response = await modernRequest(handler, "tools/call", {
+        name,
+        arguments: arguments_,
+      });
+      expect(response.result).toMatchObject({ isError: true });
+    }
+
+    expect(client.listPages).not.toHaveBeenCalled();
+    expect(client.getPageChanges).not.toHaveBeenCalled();
   });
 
   it("rejects oversized input before calling Cosense", async () => {

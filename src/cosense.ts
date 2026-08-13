@@ -4,6 +4,9 @@ const ORIGIN = "https://scrapbox.io";
 const PROJECT = "shiyui";
 const DEFAULT_LIMIT = 10;
 const MAX_INPUT_LENGTH = 500;
+const MAX_CHANGE_EVENTS = 50;
+const MAX_CHANGE_TEXT_LENGTH = 500;
+const MAX_AUTHOR_LENGTH = 200;
 const REQUEST_TIMEOUT_MS = 15_000;
 
 const nonBlankString = z
@@ -48,6 +51,30 @@ const getRelatedPagesInputSchema = z
     match: z.enum(["and", "or"]).optional().default("and"),
     limit: limitSchema.optional().default(DEFAULT_LIMIT),
     cursor: z.string().min(1).max(MAX_INPUT_LENGTH).optional(),
+  })
+  .strict();
+
+const listPagesInputSchema = z
+  .object({
+    sort: z
+      .enum(["updated", "created", "accessed", "linked", "views", "title"])
+      .optional()
+      .default("updated"),
+    limit: limitSchema.optional().default(DEFAULT_LIMIT),
+    skip: z
+      .number()
+      .int()
+      .min(0)
+      .max(Number.MAX_SAFE_INTEGER)
+      .optional()
+      .default(0),
+  })
+  .strict();
+
+const getPageChangesInputSchema = z
+  .object({
+    pageId: pageTitleSchema,
+    commitId: nonBlankString.optional(),
   })
   .strict();
 
@@ -146,9 +173,79 @@ const relationBasePageSchema = z.object({
   linksLc: z.array(z.string()).optional(),
 });
 
+const listedPageSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  descriptions: z.array(z.string()).optional(),
+  pin: z.number().finite().optional(),
+  views: z.number().finite().optional(),
+  linked: z.number().finite().optional(),
+  linesCount: z.number().finite().optional(),
+  charsCount: z.number().finite().optional(),
+  created: z.number().finite().optional(),
+  updated: z.number().finite().optional(),
+  accessed: z.number().finite().optional(),
+});
+
+const listPagesResponseSchema = z.object({
+  projectName: z.string(),
+  count: z.number().int().nonnegative(),
+  limit: z.number().int().nonnegative(),
+  skip: z.number().int().nonnegative(),
+  pages: z.array(listedPageSchema),
+});
+
+const commitLineSchema = z.object({
+  id: z.string().optional(),
+  text: z.string().optional(),
+  origText: z.string().optional(),
+});
+
+const commitChangeSchema = z.object({
+  title: z.string().optional(),
+  _insert: z.string().optional(),
+  _update: z.string().optional(),
+  _delete: z.string().optional(),
+  lines: commitLineSchema.optional(),
+});
+
+const commitSchema = z.object({
+  id: z.string().optional(),
+  changes: z.array(commitChangeSchema).optional(),
+  userId: z.string().optional(),
+  created: z.number().finite().optional(),
+});
+
+const commitsResponseSchema = z.object({
+  commits: z.array(commitSchema).optional(),
+});
+
+const userEntrySchema = z.object({
+  id: z.unknown().optional(),
+  name: z.unknown().optional(),
+  displayName: z.unknown().optional(),
+});
+
+const serviceAccountEntrySchema = z.object({
+  id: z.unknown().optional(),
+  usage: z.unknown().optional(),
+});
+
+const usersResponseSchema = z.object({
+  users: z.array(userEntrySchema).optional(),
+  memberSnapshots: z
+    .array(z.object({ data: userEntrySchema.optional() }))
+    .optional(),
+  serviceAccounts: z.array(serviceAccountEntrySchema).optional(),
+  serviceAccountSnapshots: z.array(serviceAccountEntrySchema).optional(),
+});
+
 export type MatchMode = "and" | "or";
 export type SearchSort = "pageRank" | "updated";
 export type RelatedPageRelation = "outgoing" | "incoming" | "bidirectional";
+export type PageListSort =
+  "updated" | "created" | "accessed" | "linked" | "views" | "title";
+export type PageChangeKind = "title" | "insert" | "update" | "delete";
 
 export interface GetPageInput {
   title: string;
@@ -247,6 +344,64 @@ export interface GetRelatedPagesResult {
   results: RelatedPageResultItem[];
 }
 
+export interface ListPagesInput {
+  sort?: PageListSort;
+  limit?: number;
+  skip?: number;
+}
+
+export interface ListedPageResultItem {
+  pageId: string;
+  title: string;
+  canonicalUrl: string;
+  descriptions: string[];
+  pin?: number;
+  views?: number;
+  linked?: number;
+  linesCount?: number;
+  charsCount?: number;
+  createdAt?: string;
+  updatedAt?: string;
+  accessedAt?: string;
+}
+
+export interface ListPagesResult {
+  reportedCount: number;
+  skip: number;
+  returned: number;
+  hasNext: boolean;
+  nextSkip?: number;
+  results: ListedPageResultItem[];
+}
+
+export interface GetPageChangesInput {
+  pageId: string;
+  commitId?: string;
+}
+
+export interface PageChangeResultItem {
+  kind: PageChangeKind;
+  authors: string[];
+  createdAt?: string;
+  before?: string;
+  after?: string;
+}
+
+export interface GetPageChangesResult {
+  pageId: string;
+  afterCommitId?: string;
+  commitCount: number;
+  totalChanges: number;
+  returned: number;
+  truncated: boolean;
+  latestCommitId?: string;
+  latestTitleChange?: {
+    title: string;
+    canonicalUrl: string;
+  };
+  changes: PageChangeResultItem[];
+}
+
 export class CosenseUpstreamError extends Error {
   readonly status: number;
   readonly operation: string;
@@ -295,6 +450,14 @@ export interface CosenseClient {
     input: GetRelatedPagesInput,
     signal?: AbortSignal,
   ): Promise<GetRelatedPagesResult>;
+  listPages(
+    input: ListPagesInput,
+    signal?: AbortSignal,
+  ): Promise<ListPagesResult>;
+  getPageChanges(
+    input: GetPageChangesInput,
+    signal?: AbortSignal,
+  ): Promise<GetPageChangesResult>;
 }
 
 type Fetcher = typeof fetch;
@@ -420,6 +583,177 @@ function buildRelatedResult(
     returned: pages.length,
     results: pages,
   };
+}
+
+type UserMap = Map<string, string>;
+
+type PageChangeEvent =
+  | {
+      kind: "title";
+      userIds: string[];
+      created?: number;
+      title: string;
+    }
+  | {
+      kind: "insert";
+      userIds: string[];
+      created?: number;
+      text: string;
+    }
+  | {
+      kind: "update";
+      userIds: string[];
+      created?: number;
+      lineId: string;
+      before: string;
+      after: string;
+    }
+  | {
+      kind: "delete";
+      userIds: string[];
+      created?: number;
+      text: string;
+    };
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value !== "" ? value : undefined;
+}
+
+function makeUserMap(data: z.infer<typeof usersResponseSchema>): UserMap {
+  const users: UserMap = new Map();
+
+  const addUser = (entry: z.infer<typeof userEntrySchema>): void => {
+    const id = nonEmptyString(entry.id);
+    if (id === undefined || users.has(id)) return;
+    const name =
+      nonEmptyString(entry.displayName) ?? nonEmptyString(entry.name);
+    if (name !== undefined) users.set(id, name.slice(0, MAX_AUTHOR_LENGTH));
+  };
+
+  for (const user of data.users ?? []) addUser(user);
+  for (const snapshot of data.memberSnapshots ?? []) {
+    if (snapshot.data !== undefined) addUser(snapshot.data);
+  }
+
+  const addServiceAccount = (
+    entry: z.infer<typeof serviceAccountEntrySchema>,
+    deleted: boolean,
+  ): void => {
+    const id = nonEmptyString(entry.id);
+    const usage = nonEmptyString(entry.usage);
+    if (id === undefined || usage === undefined || users.has(id)) return;
+    const suffix = deleted
+      ? " (deleted service account)"
+      : " (service account)";
+    users.set(id, `${usage}${suffix}`.slice(0, MAX_AUTHOR_LENGTH));
+  };
+
+  for (const account of data.serviceAccounts ?? []) {
+    addServiceAccount(account, false);
+  }
+  for (const snapshot of data.serviceAccountSnapshots ?? []) {
+    addServiceAccount(snapshot, true);
+  }
+
+  return users;
+}
+
+function buildPageChangeEvents(
+  commits: z.infer<typeof commitSchema>[],
+): PageChangeEvent[] {
+  const events: PageChangeEvent[] = [];
+
+  for (const commit of commits) {
+    const userId = commit.userId ?? "";
+    for (const change of commit.changes ?? []) {
+      if (typeof change.title === "string") {
+        events.push({
+          kind: "title",
+          userIds: [userId],
+          ...(commit.created === undefined ? {} : { created: commit.created }),
+          title: change.title,
+        });
+      } else if (typeof change._insert === "string") {
+        events.push({
+          kind: "insert",
+          userIds: [userId],
+          ...(commit.created === undefined ? {} : { created: commit.created }),
+          text: change.lines?.text ?? "",
+        });
+      } else if (typeof change._update === "string") {
+        const previous = events.at(-1);
+        if (previous?.kind === "update" && previous.lineId === change._update) {
+          previous.after = change.lines?.text ?? "";
+          if (commit.created === undefined) {
+            delete previous.created;
+          } else {
+            previous.created = commit.created;
+          }
+          if (userId !== "" && !previous.userIds.includes(userId)) {
+            previous.userIds.push(userId);
+          }
+        } else {
+          events.push({
+            kind: "update",
+            userIds: [userId],
+            ...(commit.created === undefined
+              ? {}
+              : { created: commit.created }),
+            lineId: change._update,
+            before: change.lines?.origText ?? "",
+            after: change.lines?.text ?? "",
+          });
+        }
+      } else if (typeof change._delete === "string") {
+        events.push({
+          kind: "delete",
+          userIds: [userId],
+          ...(commit.created === undefined ? {} : { created: commit.created }),
+          text: change.lines?.origText ?? "",
+        });
+      }
+    }
+  }
+
+  return events;
+}
+
+function resolveAuthors(userIds: string[], users: UserMap): string[] {
+  return [
+    ...new Set(userIds.map((userId) => users.get(userId) ?? "Unknown user")),
+  ];
+}
+
+function compactChangeText(text: string): string {
+  return text.slice(0, MAX_CHANGE_TEXT_LENGTH);
+}
+
+function mapPageChangeEvent(
+  event: PageChangeEvent,
+  users: UserMap,
+): PageChangeResultItem {
+  const common = {
+    kind: event.kind,
+    authors: resolveAuthors(event.userIds, users),
+    ...(event.created === undefined
+      ? {}
+      : { createdAt: toIsoTime(event.created) }),
+  };
+
+  switch (event.kind) {
+    case "title":
+      return { ...common, after: compactChangeText(event.title) };
+    case "insert":
+      return { ...common, after: compactChangeText(event.text) };
+    case "update":
+      return {
+        ...common,
+        before: compactChangeText(event.before),
+        after: compactChangeText(event.after),
+      };
+    case "delete":
+      return { ...common, before: compactChangeText(event.text) };
+  }
 }
 
 export function createCosenseClient(
@@ -629,6 +963,125 @@ export function createCosenseClient(
           ),
         );
       return buildRelatedResult(results, relatedResult.value.pagination);
+    },
+
+    async listPages(input, signal) {
+      const parsed = listPagesInputSchema.parse(input);
+      const params = new URLSearchParams();
+      params.set("sort", parsed.sort);
+      params.set("limit", String(parsed.limit));
+      params.set("skip", String(parsed.skip));
+
+      const response = await requestJson(
+        fetcher,
+        personalAccessToken,
+        apiUrl(`/api/pages/${PROJECT}/`, params),
+        "page list",
+        listPagesResponseSchema,
+        signal,
+      );
+      const results = response.pages
+        .slice(0, parsed.limit)
+        .map((page): ListedPageResultItem => ({
+          pageId: page.id,
+          title: page.title,
+          canonicalUrl: canonicalUrl(page.title),
+          descriptions: (page.descriptions ?? [])
+            .slice(0, 5)
+            .map((description) => description.slice(0, 240)),
+          ...(page.pin === undefined ? {} : { pin: page.pin }),
+          ...(page.views === undefined ? {} : { views: page.views }),
+          ...(page.linked === undefined ? {} : { linked: page.linked }),
+          ...(page.linesCount === undefined
+            ? {}
+            : { linesCount: page.linesCount }),
+          ...(page.charsCount === undefined
+            ? {}
+            : { charsCount: page.charsCount }),
+          ...(page.created === undefined
+            ? {}
+            : { createdAt: toIsoTime(page.created) }),
+          ...(page.updated === undefined
+            ? {}
+            : { updatedAt: toIsoTime(page.updated) }),
+          ...(page.accessed === undefined
+            ? {}
+            : { accessedAt: toIsoTime(page.accessed) }),
+        }));
+      const nextSkip = response.skip + results.length;
+      const hasNext = results.length > 0 && nextSkip < response.count;
+
+      return {
+        reportedCount: response.count,
+        skip: response.skip,
+        returned: results.length,
+        hasNext,
+        ...(hasNext ? { nextSkip } : {}),
+        results,
+      };
+    },
+
+    async getPageChanges(input, signal) {
+      const parsed = getPageChangesInputSchema.parse(input);
+      const params = new URLSearchParams();
+      if (parsed.commitId !== undefined) {
+        params.set("head", parsed.commitId);
+      }
+      const changesUrl = apiUrl(
+        `/api/commits/${PROJECT}/${encodeURIComponent(parsed.pageId)}`,
+        params.size === 0 ? undefined : params,
+      );
+
+      const [changesResponse, usersResponse] = await Promise.all([
+        requestJson(
+          fetcher,
+          personalAccessToken,
+          changesUrl,
+          "page changes",
+          commitsResponseSchema,
+          signal,
+        ),
+        requestJson(
+          fetcher,
+          personalAccessToken,
+          apiUrl(`/api/projects/${PROJECT}/users`),
+          "project users",
+          usersResponseSchema,
+          signal,
+        ),
+      ]);
+
+      const commits = changesResponse.commits ?? [];
+      const events = buildPageChangeEvents(commits);
+      const selectedEvents = events.slice(-MAX_CHANGE_EVENTS);
+      const users = makeUserMap(usersResponse);
+      const latestCommitId = commits.at(-1)?.id;
+      const latestTitle = events
+        .filter((event) => event.kind === "title")
+        .at(-1)?.title;
+
+      return {
+        pageId: parsed.pageId,
+        ...(parsed.commitId === undefined
+          ? {}
+          : { afterCommitId: parsed.commitId }),
+        commitCount: commits.length,
+        totalChanges: events.length,
+        returned: selectedEvents.length,
+        truncated: events.length > selectedEvents.length,
+        ...(latestCommitId === undefined ? {} : { latestCommitId }),
+        ...(latestTitle === undefined
+          ? {}
+          : {
+              latestTitleChange: {
+                title: latestTitle,
+                canonicalUrl: canonicalUrl(latestTitle),
+              },
+            }),
+        changes: selectedEvents.map((event) =>
+          mapPageChangeEvent(event, users),
+        ),
+      };
     },
   };
 }

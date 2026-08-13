@@ -4,7 +4,7 @@
 
 設計更新: 2026-08-13（JST）
 
-状態: Cosense Personal Access Token（PAT）を必須とする実装へ更新し、Publicの `shiyui` に対するPAT付きlocal live smokeとProduction再deployを完了。Productionでは `COSENSE_PAT` Secret bindingと未認証requestの拒否を確認した。Cloudflare Access設定とMCP OAuth構成は変更していない。ChatGPTからのread callとPrivate projectでの確認は未実施。
+状態: Cosense Personal Access Token（PAT）を必須とする実装へ更新し、既存4 toolについてPublicの `shiyui` に対するPAT付きlocal live smokeとProduction再deployを完了。`list_pages` と `get_page_changes` を追加したが、この2 toolのlive smokeとProduction deployは未実施。Cloudflare Access設定とMCP OAuth構成は変更していない。ChatGPTからのread callとPrivate projectでの確認も未実施。
 
 ## 結論
 
@@ -15,16 +15,18 @@
 - Cosense 自身のタイトル・リンク記法ベクトル検索
 - 1-hop / 2-hop の関連ページ取得と絞り込み
 
-この匿名観測はendpoint調査時のbaselineとしてだけ残す。現行設計はPublic / Privateを分岐せず、4 toolから発生するすべての `shiyui` 固定GETにPATを送る。Public dataが匿名で取得できる場合も、匿名fallbackは行わない。
+この匿名観測はendpoint調査時のbaselineとしてだけ残す。現行設計はPublic / Privateを分岐せず、6 toolから発生するすべての `shiyui` 固定GETにPATを送る。Public dataが匿名で取得できる場合も、匿名fallbackは行わない。
 
-推奨する v1 は、次の4 toolに限定する。
+現行MCPは、次の6 toolに限定する。
 
 1. `get_page`
 2. `search_full_text`
 3. `search_vector`
 4. `get_related_pages`
+5. `list_pages`
+6. `get_page_changes`
 
-PATはCloudflare Secret `COSENSE_PAT` にだけ保存し、各Cosense GETへ `x-personal-access-token` として付与する。未設定またはtrim後に空ならupstreamへ接続せずfail closedとする。upstreamの `401` / `403` はどちらも安全な認証失敗へ変換し、PATとupstream bodyを返さない。PAT headerの利用はHelpfeel公式CLIの現行実装に基づくが、安定した公開API契約やstatusごとの意味としては扱わない。[request implementation](https://github.com/helpfeel/cosense-cli/blob/70c62293e3755a43f87e58e8dc59e9e896afcbcb/src/lib/request.ts#L44-L78)
+PATはCloudflare Secret `COSENSE_PAT` にだけ保存し、各Cosense GETへ `x-personal-access-token` として付与する。未設定またはtrim後に空ならupstreamへ接続せずfail closedとする。upstreamの `401` / `403` はどちらも安全な認証失敗へ変換し、PATとupstream bodyを返さない。PAT headerの利用はHelpfeel公式CLIの現行実装に基づくが、安定した公開API契約やstatusごとの意味としては扱わない。[request implementation](https://github.com/helpfeel/cosense-cli/blob/e06bc890958cfe8d1b6fe932db06c35eb8c8577d/src/lib/request.ts#L44-L78)
 
 MCP endpoint自体は引き続きCloudflare Access Managed OAuthで一人だけに制限する。WorkerはAccessが付与する `Cf-Access-Jwt-Assertion` を検証してからstateless `createMcpHandler()`を実行する。Cosense PAT以外のcredential、OAuth secret、MCP session、Durable Objects、D1、R2、独自cache、同期jobは不要である。
 
@@ -39,7 +41,8 @@ Cloudflare Dashboardで、Workers Free、Zero Trust Teams Free Base、通常のF
 | 対象                                                                                                                                | 固定した版                                                             |
 | ----------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
 | [`worldnine/scrapbox-cosense-mcp`](https://github.com/worldnine/scrapbox-cosense-mcp/tree/d4f649f3c18383d748cbda73b9181c59c0f2d8ce) | `d4f649f3c18383d748cbda73b9181c59c0f2d8ce`（v0.9.0 系）                |
-| [`helpfeel/cosense-cli`](https://github.com/helpfeel/cosense-cli/tree/70c62293e3755a43f87e58e8dc59e9e896afcbcb)                     | `70c62293e3755a43f87e58e8dc59e9e896afcbcb`                             |
+| [`helpfeel/cosense-cli`](https://github.com/helpfeel/cosense-cli/tree/70c62293e3755a43f87e58e8dc59e9e896afcbcb)                     | 基礎調査: `70c62293e3755a43f87e58e8dc59e9e896afcbcb`                   |
+| [`helpfeel/cosense-cli`](https://github.com/helpfeel/cosense-cli/tree/e06bc890958cfe8d1b6fe932db06c35eb8c8577d)                     | 追加2 tool: `e06bc890958cfe8d1b6fe932db06c35eb8c8577d`（v1.10.1）      |
 | Cosense 公式 Help / 本番 API / Web client                                                                                           | 2026-08-12 に確認                                                      |
 | MCP specification                                                                                                                   | [2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28) |
 | Cloudflare Agents / Access Managed OAuth                                                                                            | 2026-08-12 の公式 documentation と current example                     |
@@ -59,25 +62,25 @@ Cosense は公式に、掲載 API を内部 API とし、予告なく変更す�
 
 以下は2026-08-12のendpoint調査時の観測であり、現行MCPの認証経路ではない。`curl -q` を使い、Cookie、`connect.sid`、Authorization、PAT、Service Account key、curl 設定を付けずに `https://scrapbox.io/shiyui/` のデータを取得した。レスポンス本文は保存していない。
 
-| 機能                | GET endpoint                                                 | status | 当時の観測                                         | 現行tool |
-| ------------------- | ------------------------------------------------------------ | -----: | -------------------------------------------------- | -------: |
-| ページ一覧          | `/api/pages/shiyui/?limit=10&skip=0&sort=linked`             |    200 | 件数、page metadata、10件の実ページ                |   不採用 |
-| Pages API v2        | `/api/pages/v2/shiyui/日記`                                  |    200 | `commitId`、12行の本文、links、files、page metrics |     採用 |
-| Pages API v1        | `/api/pages/shiyui/日記`                                     |    200 | 本文と旧 `relatedPages` shape                      |   不採用 |
-| 全文検索            | `/api/pages/shiyui/search/query?q=日記`                      |    200 | 11件、exact title、一致行、Elasticsearch metadata  |     採用 |
-| vector              | `/api/pages/shiyui/search/vector/titles?q=日記`              |    200 | 3件、`score`、`exists`                             |     採用 |
-| 1-hop               | `/api/pages/v2/shiyui/日記/links1hop`                        |    200 | 12件、pagination                                   |     採用 |
-| 2-hop               | `/api/pages/v2/shiyui/日記/links2hop`                        |    200 | 1件、pagination                                    |     採用 |
-| 1-hop search        | `.../links1hop?search=2026`                                  |    200 | 絞り込み6件、match metadata                        |     採用 |
-| 2-hop search        | `.../links2hop?search=2026`                                  |    200 | 正常応答、該当0件                                  |     採用 |
-| Project users       | `/api/projects/shiyui/users`                                 |    200 | 公開 user map                                      |   不採用 |
-| Smart Context 1-hop | `/api/smart-context/export-1hop-links/shiyui.txt?title=日記` |    401 | `NotLoggedInError`                                 |   不採用 |
-| Smart Context 2-hop | `/api/smart-context/export-2hop-links/shiyui.txt?title=日記` |    401 | `NotLoggedInError`                                 |   不採用 |
-| ページ変更履歴      | `/api/commits/shiyui/{pageId}`                               |    401 | `NotLoggedInError`                                 |   不採用 |
-| file metadata       | `/api/gcs/{public-page-file-id}/info`                        |    401 | `NotLoggedInError`                                 |   不採用 |
-| public file本体     | `/files/{public-page-file-id}.jpg`                           |    200 | `image/jpeg`、179,637 bytes。bodyは保存せず破棄    |   不採用 |
+| 機能                | GET endpoint                                                 | status | 当時の観測                                         |                        現行tool |
+| ------------------- | ------------------------------------------------------------ | -----: | -------------------------------------------------- | ------------------------------: |
+| ページ一覧          | `/api/pages/shiyui/?limit=10&skip=0&sort=linked`             |    200 | 件数、page metadata、10件の実ページ                |                            採用 |
+| Pages API v2        | `/api/pages/v2/shiyui/日記`                                  |    200 | `commitId`、12行の本文、links、files、page metrics |                            採用 |
+| Pages API v1        | `/api/pages/shiyui/日記`                                     |    200 | 本文と旧 `relatedPages` shape                      |                          不採用 |
+| 全文検索            | `/api/pages/shiyui/search/query?q=日記`                      |    200 | 11件、exact title、一致行、Elasticsearch metadata  |                            採用 |
+| vector              | `/api/pages/shiyui/search/vector/titles?q=日記`              |    200 | 3件、`score`、`exists`                             |                            採用 |
+| 1-hop               | `/api/pages/v2/shiyui/日記/links1hop`                        |    200 | 12件、pagination                                   |                            採用 |
+| 2-hop               | `/api/pages/v2/shiyui/日記/links2hop`                        |    200 | 1件、pagination                                    |                            採用 |
+| 1-hop search        | `.../links1hop?search=2026`                                  |    200 | 絞り込み6件、match metadata                        |                            採用 |
+| 2-hop search        | `.../links2hop?search=2026`                                  |    200 | 正常応答、該当0件                                  |                            採用 |
+| Project users       | `/api/projects/shiyui/users`                                 |    200 | 公開 user map                                      | 変更履歴のactor名解決だけに採用 |
+| Smart Context 1-hop | `/api/smart-context/export-1hop-links/shiyui.txt?title=日記` |    401 | `NotLoggedInError`                                 |                          不採用 |
+| Smart Context 2-hop | `/api/smart-context/export-2hop-links/shiyui.txt?title=日記` |    401 | `NotLoggedInError`                                 |                          不採用 |
+| ページ変更履歴      | `/api/commits/shiyui/{pageId}`                               |    401 | `NotLoggedInError`                                 |                            採用 |
+| file metadata       | `/api/gcs/{public-page-file-id}/info`                        |    401 | `NotLoggedInError`                                 |                          不採用 |
+| public file本体     | `/files/{public-page-file-id}.jpg`                           |    200 | `image/jpeg`、179,637 bytes。bodyは保存せず破棄    |                          不採用 |
 
-当時の匿名レスポンスには、現行4 toolに必要な本文、候補 title、score、match 行、関連 page metadata が含まれていた。認証成功側の実通信は行っていない。表の401はその時点で匿名不可だったことだけを示し、PATの正式仕様や `401` と `403` の意味を示すものではない。現行MCPは表のstatusにかかわらず全GETへPATを送る。
+当時の匿名レスポンスには、当時の4 toolに必要な本文、候補 title、score、match 行、関連 page metadata が含まれていた。認証成功側の実通信は行っていない。表の401はその時点で匿名不可だったことだけを示し、PATの正式仕様や `401` と `403` の意味を示すものではない。現行MCPは表のstatusにかかわらず全GETへPATを送る。
 
 ## 既存 `scrapbox-cosense-mcp`
 
@@ -109,7 +112,7 @@ CLIのcommand登録とrequest処理は固定commit `70c6229` を確認した。[
 
 ### Read / auth関連 command
 
-read-only commandのHTTP requestはGETである。多くの command は本体 GET と別に `/api/projects/{project}/users` を取得し、user ID と timestamp を人間向けに補完する。この補完 request が失敗すると本体も失敗する。今回のMCPでは user名を必要としないため、この追加 request は採用しない。
+read-only commandのHTTP requestはGETである。多くの command は本体 GET と別に `/api/projects/{project}/users` を取得し、user ID と timestamp を人間向けに補完する。この補完 request が失敗すると本体も失敗する。今回のMCPでは、変更履歴のactor名を返す `get_page_changes` だけがusers GETを使用する。`list_pages` と既存4 toolには追加しない。
 
 表の「credential-aware」は公式CLI自身の挙動を表す。CLIはcredentialが見つからなければheaderなしでrequestできるが、このMCPはそのfallbackを採用しない。Public / Privateの区別なく `COSENSE_PAT` を必須にする。
 
@@ -132,7 +135,7 @@ read-only commandのHTTP requestはGETである。多くの command は本体 GE
 | `readFileInfo`       | `/api/gcs/{fileId}/info`                                     | file URL、project option       | origin PATを選択、またはproject指定時SA。credentialなしも送信可       |
 | `downloadFile`       | `/files/{fileId}[?type=thumbnail]`                           | file URL、output path          | credential-awareなremote read + local atomic上書き                    |
 
-主要 source: [readPage](https://github.com/helpfeel/cosense-cli/blob/70c62293e3755a43f87e58e8dc59e9e896afcbcb/src/commands/readPage.ts#L83-L90)、[searchFullText](https://github.com/helpfeel/cosense-cli/blob/70c62293e3755a43f87e58e8dc59e9e896afcbcb/src/commands/searchFullText.ts#L109-L118)、[searchVector](https://github.com/helpfeel/cosense-cli/blob/70c62293e3755a43f87e58e8dc59e9e896afcbcb/src/commands/searchVector.ts#L62-L70)、[related helper](https://github.com/helpfeel/cosense-cli/blob/70c62293e3755a43f87e58e8dc59e9e896afcbcb/src/lib/relatedPages.ts#L9-L14)。いずれもcredentialをrequest helperへ渡す実装であり、PAT自体の安定した公開API契約を示すものではない。
+主要 source: [readPage](https://github.com/helpfeel/cosense-cli/blob/70c62293e3755a43f87e58e8dc59e9e896afcbcb/src/commands/readPage.ts#L83-L90)、[searchFullText](https://github.com/helpfeel/cosense-cli/blob/70c62293e3755a43f87e58e8dc59e9e896afcbcb/src/commands/searchFullText.ts#L109-L118)、[searchVector](https://github.com/helpfeel/cosense-cli/blob/70c62293e3755a43f87e58e8dc59e9e896afcbcb/src/commands/searchVector.ts#L62-L70)、[related helper](https://github.com/helpfeel/cosense-cli/blob/70c62293e3755a43f87e58e8dc59e9e896afcbcb/src/lib/relatedPages.ts#L9-L14)、[listPages](https://github.com/helpfeel/cosense-cli/blob/e06bc890958cfe8d1b6fe932db06c35eb8c8577d/src/commands/listPages.ts#L132-L153)、[browsePageChanges](https://github.com/helpfeel/cosense-cli/blob/e06bc890958cfe8d1b6fe932db06c35eb8c8577d/src/commands/browsePageChanges.ts#L190-L230)。いずれもcredentialをrequest helperへ渡す実装であり、PAT自体の安定した公開API契約を示すものではない。
 
 ### 非read command
 
@@ -140,11 +143,11 @@ read-only commandのHTTP requestはGETである。多くの command は本体 GE
 - `previewEdit`: `/api/pages/v2/{project}/page-edit-for-ai/preview` へ POSTし、5分のserver-side preview stateを作る。
 - `submitEdit`: `/api/pages/v2/{project}/page-edit-for-ai/submit` へ POSTし、pageをcommitする。
 
-これらの code と dependency はv1に含めない。
+これらの code と dependency は現行MCPに含めない。
 
 ### CLIの認証・request処理
 
-`requestJson` はcredentialに応じて次のいずれかを送る。[request implementation](https://github.com/helpfeel/cosense-cli/blob/70c62293e3755a43f87e58e8dc59e9e896afcbcb/src/lib/request.ts#L44-L78)
+`requestJson` はcredentialに応じて次のいずれかを送る。[request implementation](https://github.com/helpfeel/cosense-cli/blob/e06bc890958cfe8d1b6fe932db06c35eb8c8577d/src/lib/request.ts#L44-L78)
 
 - PAT: `x-personal-access-token`
 - Service Account: `x-service-account-access-key`
@@ -157,7 +160,7 @@ CLIは source-levelの型を期待するが、runtime response schemaを検証�
 
 公式Skillは、themeを探す際にvector queryを複数の言い換えで試し、候補を選んでからpage本文を読み、必要な場合だけ1/2-hopへ深める手順を勧めている。vectorはtitleとlink記法だけなので、本文語を探す場合はfull-textを使い分ける。すべての関連pageを読むのではなく、description、relation、pageRankから選ぶ。[read-page workflow](https://github.com/helpfeel/cosense-cli/blob/70c62293e3755a43f87e58e8dc59e9e896afcbcb/skills/cosense/read-page.md)
 
-通常の閲覧はAI向けに整形する `browsePage`、edit anchorや機械処理が必要な場合だけraw寄りの `readPage` という境界も明記されている。今回のMCPはwriteを持たないため、`get_page` は本文とfreshness識別子だけを返し、line IDを返さない。page changesは現在の内容を読む4-tool構成の目的外なので含めない。Skillはwriteをユーザーの明示指示時だけ許可する方針である。[Skill routing](https://github.com/helpfeel/cosense-cli/blob/70c62293e3755a43f87e58e8dc59e9e896afcbcb/skills/cosense/SKILL.md)
+通常の閲覧はAI向けに整形する `browsePage`、edit anchorや機械処理が必要な場合だけraw寄りの `readPage` という境界も明記されている。今回のMCPはwriteを持たないため、`get_page` は本文とfreshness識別子だけを返し、line IDを返さない。変更履歴は `get_page` の `pageId` / `commitId` を起点に、1 pageの説明可能な変更だけを返す。Skillはwriteをユーザーの明示指示時だけ許可する方針である。[Skill routing](https://github.com/helpfeel/cosense-cli/blob/70c62293e3755a43f87e58e8dc59e9e896afcbcb/skills/cosense/SKILL.md)
 
 ## Cosense read機能の整理
 
@@ -174,9 +177,9 @@ CLIは source-levelの型を期待するが、runtime response schemaを検証�
 - `links`, `linksLc`, `projectLinks`, `icons`, `descriptions`
 - `files`, `infoboxDefinition`, `infoboxDisableLinks`, `infoboxResult`
 
-`persistent:false` は未作成pageであり、server templateの仮IDを識別子として返してはいけない。v1では `exists:false` と canonical URLだけを返す。
+`persistent:false` は未作成pageであり、server templateの仮IDを識別子として返してはいけない。現行MCPでは `exists:false` と canonical URLだけを返す。
 
-2026-01-05 に Pages API から userの `name` / `email` が削除された。今回の用途では author identity を返さず、Project users APIとのjoinもしない。これによりrequest数と個人情報を減らす。
+2026-01-05 に Pages API から userの `name` / `email` が削除された。`get_page` はauthor identityを返さず、Project users APIともjoinしない。users GETは `get_page_changes` のactor名解決だけに限定する。
 
 ### Full-text と vector
 
@@ -210,7 +213,7 @@ UIのQuick Searchは、先頭5件のQuick Search、vector、残りのQuick Searc
 
 hop responseのpaginationは `{perPage,total,hasNext,nextId}`、既定 `perPage=1000` である。次pageは `nextId` と `perPage` をqueryに渡すことを、2026-08-12の公式Web client asset `assets-20260810-073323` で確認した。[official web bundle](https://scrapbox.io/assets/chunks/chunk-BZ7AQD4N.js)
 
-v1の `get_related_pages` は一覧を文脈候補として返し、本文は返さない。上位候補を取得後に `get_page` を使う。起点pageも取得して1-hopのrelationを計算する。大量列挙ではなく選択が目的なので、toolの `limit` は最大20とし、upstreamへ同じ値を `perPage` として渡す。受信した候補にも同じ上限を適用する。`hasNext` がtrueなら `nextId` をopaqueな `nextCursor` として返し、次callの `cursor` で続きから取得する。
+現行の `get_related_pages` は一覧を文脈候補として返し、本文は返さない。上位候補を取得後に `get_page` を使う。起点pageも取得して1-hopのrelationを計算する。大量列挙ではなく選択が目的なので、toolの `limit` は最大20とし、upstreamへ同じ値を `perPage` として渡す。受信した候補にも同じ上限を適用する。`hasNext` がtrueなら `nextId` をopaqueな `nextCursor` として返し、次callの `cursor` で続きから取得する。
 
 Smart Contextは1 requestで大量本文を取れる利点があるが、次の理由で採用しない。
 
@@ -222,22 +225,22 @@ Smart Contextは1 requestで大量本文を取れる利点があるが、次の�
 
 出典は [Cosense公式リリースノート2026](https://scrapbox.io/help-jp/%E3%83%AA%E3%83%AA%E3%83%BC%E3%82%B9%E3%83%8E%E3%83%BC%E3%83%882026)。公式pageは手動更新の遅延があり、2026-08-12時点の最終掲載は04-13であるため、それ以後に変更がないとは断定しない。
 
-| 日付       | read用途に関係する変更                                             | 含意                                            |
-| ---------- | ------------------------------------------------------------------ | ----------------------------------------------- |
-| 2026-01-05 | Pages APIからuser `name` / `email`を削除                           | user詳細はProject APIとのjoinが必要。v1では不要 |
-| 2026-02-23 | private Smart Context向けsigned URL                                | private context共有の正式経路。5分・1回利用     |
-| 2026-02-24 | Service Account / Smart Context rate-limit model調整               | rate limitの存在は分かるが数値は非公開          |
-| 2026-03-24 | page title vector search                                           | semanticなtitle候補取得が可能                   |
-| 2026-03-25 | JSON import title vectorの定期修復、UIでQuick Searchとvectorを融合 | raw vectorとUI検索は同一でない                  |
-| 2026-03-27 | link補完でもQuick Searchとvectorを融合                             | UI固有の候補合成                                |
-| 2026-03-30 | vector API callを共通hook化                                        | 外部契約変更とは断定不可                        |
-| 2026-04-11 | Pages API v2。本文とrelated分離、pagination、2-hop search拡張      | v2本文 + hop endpointを採用                     |
-| 2026-04-12 | 非2-hop-searchのrelatedにも取得上限                                | pagination metadataを無視しない                 |
-| 2026-04-13 | 空pageへのlink記法もvector対象                                     | `exists:false`を扱う                            |
+| 日付       | read用途に関係する変更                                             | 含意                                                         |
+| ---------- | ------------------------------------------------------------------ | ------------------------------------------------------------ |
+| 2026-01-05 | Pages APIからuser `name` / `email`を削除                           | `get_page`ではjoinせず、変更履歴のactor名解決だけusersを取得 |
+| 2026-02-23 | private Smart Context向けsigned URL                                | private context共有の正式経路。5分・1回利用                  |
+| 2026-02-24 | Service Account / Smart Context rate-limit model調整               | rate limitの存在は分かるが数値は非公開                       |
+| 2026-03-24 | page title vector search                                           | semanticなtitle候補取得が可能                                |
+| 2026-03-25 | JSON import title vectorの定期修復、UIでQuick Searchとvectorを融合 | raw vectorとUI検索は同一でない                               |
+| 2026-03-27 | link補完でもQuick Searchとvectorを融合                             | UI固有の候補合成                                             |
+| 2026-03-30 | vector API callを共通hook化                                        | 外部契約変更とは断定不可                                     |
+| 2026-04-11 | Pages API v2。本文とrelated分離、pagination、2-hop search拡張      | v2本文 + hop endpointを採用                                  |
+| 2026-04-12 | 非2-hop-searchのrelatedにも取得上限                                | pagination metadataを無視しない                              |
+| 2026-04-13 | 空pageへのlink記法もvector対象                                     | `exists:false`を扱う                                         |
 
 03-08の対話context export/import、03-17のPR review、04-06のsubagent consultation等、AI Agent向けSkillの追加も記録されている。これらはCosense RESTのread endpointではなく、今回のMCP toolとして移植しない。API利用方法とPAT headerは、公式リリースノートだけでなくHelpfeel公式CLIの固定commit `70c6229` と過去の本番実測で補った。
 
-固定commit `70c6229` の公式CLIは Pages v2 と分割hop endpointを使う一方、hopの `pagination.nextId` を処理しない。v1 MCPは大量pageを一括取得せず、`perPage=limit` と `nextId` cursorで必要な続きだけ取得できるようにする。
+固定commit `70c6229` の公式CLIは Pages v2 と分割hop endpointを使う一方、hopの `pagination.nextId` を処理しない。現行MCPは大量pageを一括取得せず、`perPage=limit` と `nextId` cursorで必要な続きだけ取得できるようにする。
 
 ## 最新性、cache、index、rate limit
 
@@ -272,19 +275,19 @@ MCP responseにも `Cache-Control: no-store` を付け、Cache API、Cache Rules
 | `connect.sid`            | browser session相当                                      | Cloudflare Secret        | 不採用                      |
 | Smart Context signed URL | private contextの一時download。発行flowとstateが別途必要 | 発行時にcredentialが必要 | 不採用                      |
 
-Public / Privateを同じrequest pathで扱うため、PATを「Privateのときだけ」付ける分岐は置かない。4 toolが行う1 callあたり1–2件のGETすべてに同じ `COSENSE_PAT` を付与する。Service Account、session、匿名へfallbackしない。
+Public / Privateを同じrequest pathで扱うため、PATを「Privateのときだけ」付ける分岐は置かない。6 toolが行う1 callあたり1–2件のGETすべてに同じ `COSENSE_PAT` を付与する。Service Account、session、匿名へfallbackしない。
 
-PATは `https://scrapbox.io/settings/personal-access-tokens` で発行する。Helpfeel公式CLIはPATを `x-personal-access-token` として送るが、これは現行sourceに基づく実装上の先例であり、PAT APIが正式に文書化された安定契約だとは断定しない。[login guidance](https://github.com/helpfeel/cosense-cli/blob/70c62293e3755a43f87e58e8dc59e9e896afcbcb/skills/cosense/login.md#L6-L17) [request implementation](https://github.com/helpfeel/cosense-cli/blob/70c62293e3755a43f87e58e8dc59e9e896afcbcb/src/lib/request.ts#L44-L78)
+PATは `https://scrapbox.io/settings/personal-access-tokens` で発行する。Helpfeel公式CLIはPATを `x-personal-access-token` として送るが、これは現行sourceに基づく実装上の先例であり、PAT APIが正式に文書化された安定契約だとは断定しない。[login guidance](https://github.com/helpfeel/cosense-cli/blob/70c62293e3755a43f87e58e8dc59e9e896afcbcb/skills/cosense/login.md#L6-L17) [request implementation](https://github.com/helpfeel/cosense-cli/blob/e06bc890958cfe8d1b6fe932db06c35eb8c8577d/src/lib/request.ts#L44-L78)
 
 本番は `npx wrangler secret put COSENSE_PAT` でSecret bindingへ保存する。localはGit管理外の `.dev.vars` にだけ実値を置く。`wrangler.jsonc` の平文 `vars`、`.dev.vars.example`、README、Gitへ実値を置かない。
 
 `COSENSE_PAT` が存在しない場合とtrim後に空の場合は、Cosenseへrequestせず設定エラーにする。Cosenseから `401` または `403` が返った場合は、どちらも同じ認証失敗に変換する。client resultとlogへPAT、upstream body、statusごとの推測を含めない。PATの期限、自動更新、事前通知、`401` と `403` の区別は公開仕様として確認できていないため、失敗時はPATを手動で再発行・再登録して確認する。
 
-将来Smart Contextやfile抽出textが必要になっても、現行4-tool構成へ暗黙に追加しない。credential方式とデータ境界を改めて評価する。
+将来Smart Contextやfile抽出textが必要になっても、現行6-tool構成へ暗黙に追加しない。credential方式とデータ境界を改めて評価する。
 
 ## 推奨MCP tool仕様
 
-projectはsource定数 `shiyui` とし、tool引数にproject、URL、credentialを持たせない。4 toolから発生する全GETにはWorker secret `COSENSE_PAT` を `x-personal-access-token` として付与する。MCP endpoint全体をAccess policyで保護し、各toolは `annotations.readOnlyHint: true`、`openWorldHint: true` とする。外部CosenseへGETするため `openWorldHint` はfalseにしない。現行specで `destructiveHint` / `idempotentHint` は `readOnlyHint:false` の場合だけ意味を持つため、read toolでは省略する。
+projectはsource定数 `shiyui` とし、tool引数にproject、URL、credentialを持たせない。6 toolから発生する全GETにはWorker secret `COSENSE_PAT` を `x-personal-access-token` として付与する。MCP endpoint全体をAccess policyで保護し、各toolは `annotations.readOnlyHint: true`、`openWorldHint: true` とする。外部CosenseへGETするため `openWorldHint` はfalseにしない。現行specで `destructiveHint` / `idempotentHint` は `readOnlyHint:false` の場合だけ意味を持つため、read toolでは省略する。
 
 ### `get_page`
 
@@ -317,6 +320,39 @@ projectはsource定数 `shiyui` とし、tool引数にproject、URL、credential
 ```
 
 `text` はtitle行を除いたpage本文を改行で連結する。`persistent:false` はtool errorではなく `exists:false` とする。line ID、author、user email、raw response全体、generated Infoboxは返さない。
+
+### `list_pages`
+
+入力:
+
+```json
+{
+  "sort": "updated",
+  "limit": 10,
+  "skip": 0
+}
+```
+
+`sort` は `updated | created | accessed | linked | views | title`、`limit` は1–20、`skip` は0以上の明示的なoffsetとする。処理は `GET /api/pages/shiyui/?sort=&limit=&skip=` の1 requestだけで完結する。公式CLIの `listPages` は同じ一覧GET後にusersを取得するが、MCPはactorを返さないためusers GETを行わない。[official CLI listPages](https://github.com/helpfeel/cosense-cli/blob/e06bc890958cfe8d1b6fe932db06c35eb8c8577d/src/commands/listPages.ts#L132-L153)
+
+出力は `reportedCount`、`skip`、`returned`、`hasNext`、任意の `nextSkip` と、各pageの `pageId`、`title`、短いdescriptions、作成・更新・アクセス時刻、page metrics、canonical URLに限定する。本文、user情報、raw responseは返さない。一覧取得後のdetail GET、N+1、自動pagination、全件走査を行わず、続きはLLMまたはユーザーが `nextSkip` を次callの `skip` に明示したときだけ取得する。
+
+### `get_page_changes`
+
+入力:
+
+```json
+{
+  "pageId": "...",
+  "commitId": "..."
+}
+```
+
+`pageId` は `get_page` が返す不変ID、任意の `commitId` は同じ出力のfreshness識別子を使う。commitId指定時は `GET /api/commits/shiyui/{pageId}?head={commitId}`、省略時はqueryなしとし、指定commitより後の変更を取得する。title変更後もpageIdで同じpageを追跡できる。公式CLIの `browsePageChanges` も同じ `head` とpageIdを使う。[official CLI browsePageChanges](https://github.com/helpfeel/cosense-cli/blob/e06bc890958cfe8d1b6fe932db06c35eb8c8577d/src/commands/browsePageChanges.ts#L190-L230)
+
+処理は対象pageのcommits GETと、actor名解決に必要な `GET /api/projects/shiyui/users` の2 requestを並列実行する。この2件だけで完結し、`get_page`、関連page、他pageの履歴は取得しない。自動retry、pagination、再帰取得も行わない。
+
+出力は `pageId`、任意の `afterCommitId`、`commitCount`、`totalChanges`、`returned`、`truncated`、任意の `latestCommitId` / `latestTitleChange` と、説明可能な変更eventを返す。eventはtitle、insert、update、delete、actor name、時刻、任意のbefore/afterだけとする。最新50 eventを上限とし、before/afterは各500文字までに切り詰める。email、user ID、line ID、派生metadata、raw commitは返さない。
 
 ### `search_full_text`
 
@@ -370,17 +406,15 @@ projectはsource定数 `shiyui` とし、tool引数にproject、URL、credential
 
 各toolは、人間向けの `title`、機械可読な `outputSchema`、短い `content`、`structuredContent` を返す。巨大なraw JSONや同じ本文の重複は避ける。現在のMCP tool call resultは `resultType: "complete"` を要求する。`tools/list` には `resultType: "complete"`、`ttlMs: 0`、`cacheScope: "private"` を設定し、認証された一人用tool metadataをprotocol上もcacheしない。SDKが実際にこの形を出すことをcontract testで確認する。[MCP tools](https://modelcontextprotocol.io/specification/2026-07-28/server/tools) [OpenAI MCP build guide](https://developers.openai.com/plugins/build/mcp-server)
 
-## v1へ採用しない機能
+## 現行MCPへ採用しない機能
 
 | 機能                                   | 理由                                                                       |
 | -------------------------------------- | -------------------------------------------------------------------------- |
-| `list_pages`                           | discoveryは2種類のsearchとrelatedで足りる。全page列挙をLLMへ渡さない       |
 | Pages API v1 / Web page scrape         | v2が本文とrelatedを分離。最新本文の原本を一つにする                        |
-| Smart Context                          | 大量本文、4-tool構成と重複、schema/limit非保証                             |
+| Smart Context                          | 大量本文、既存toolと重複、schema/limit非保証                               |
 | browse系の巨大context                  | tool内で候補選択と本文取得を混ぜない                                       |
-| change history                         | 現在の内容を読む目的外                                                     |
-| file metadata / download               | binary/OCR用途はv1の中心でなく、任意file fetchを持たせない                 |
-| Project users / members                | ChatGPTの検索・本文理解に不要。個人情報とrequestが増える                   |
+| file metadata / download               | binary/OCR用途は現行MCPの中心でなく、任意file fetchを持たせない            |
+| Project users / members tool           | 公開toolにはせず、変更履歴のactor名解決に必要なGETだけを内部利用           |
 | Infobox table生成                      | generated resultにhallucination/truncated flagがあり、本文からの参照を優先 |
 | page creation / append / edit / delete | read-only要件。write code自体を置かない                                    |
 | arbitrary project / arbitrary URL      | 固定projectとSSRF防止に反する                                              |
@@ -400,7 +434,7 @@ ChatGPT
      -> Cf-Access-Jwt-Assertion
   -> Workerで署名 / issuer / Application Audience / expを検証
   -> createMcpHandler(createServer)
-  -> 4 read-only tools
+  -> 6 read-only tools
   -> 必須Cloudflare Secret COSENSE_PATを解決
      -> 未設定 / 空: upstreamへ接続せず失敗
   -> fetch(GET, cache: "no-store", x-personal-access-token: COSENSE_PAT)
@@ -437,7 +471,7 @@ Managed OAuthはAccess edgeをOAuth authorization serverにする。Protected Re
 - One-time PINを本人確認に使える。
 - OAuthのstateとtokenをWorkerで保存しない。
 - Worker側のOAuth secretとKVが不要になる。
-- 4 toolすべて同じread-only権限なのでcustom scopeを設けない。
+- 6 toolすべて同じread-only権限なのでcustom scopeを設けない。
 
 Access for SaaSのGeneric OIDC applicationは使用しない。Self-hosted Access applicationでWorkerの公開hostnameを保護し、Managed OAuthとDCRを有効にする。Access policyはIncludeを本人のemail 1件にし、identity providerはOne-time PINだけを利用可能にする。
 
@@ -461,7 +495,7 @@ Managed OAuthのclient bearerはopaqueであり、Workerでdecodeしない。Acc
 
 - originは `https://scrapbox.io` 固定。
 - projectは `shiyui` 固定。
-- tool入力はtitle、query、enum、small integerだけ。
+- tool入力はtitle、query、pageId、commitId、enum、上限付きlimit、非負のoffsetだけ。
 - LLMからURL、project、header、credential、file pathを受け取らない。
 - allowlist済みpath builder以外をfetchしない。
 - HTTP methodはGETだけ。write endpoint文字列、WebSocket dependency、edit operationをsourceに置かない。
@@ -479,31 +513,34 @@ Managed OAuthのclient bearerはopaqueであり、Workerでdecodeしない。Acc
 - logにPAT、page本文、query、OAuth token、Access assertionを出さない。
 - upstreamの `401` / `403` は同じ認証失敗として返し、PAT、upstream body、statusごとの推測を含めない。
 - その他のupstream errorもbodyをそのままLLMへ返さない。
-- responseのuser name/emailは不要なので除外する。
+- email、user ID、line IDをresponseから除外する。変更履歴のactorはnameだけを返す。
 
 ## 受け入れテスト
 
 最低限次を確認する。
 
-| 対象             | 確認内容                                                                                               |
-| ---------------- | ------------------------------------------------------------------------------------------------------ |
-| PAT設定          | `COSENSE_PAT` の欠落と空白だけの値でfail closedになり、Cosense fetchを行わない                         |
-| PAT送信          | 4 toolの全GETとrelatedの2 request双方へ `x-personal-access-token` を送り、Public / Privateで分岐しない |
-| PAT error        | upstreamの `401` / `403` を同じ認証失敗として返し、PATとupstream bodyをresponse / logへ含めない        |
-| `get_page`       | `日記`、`2026-08-11`、日本語、space、`/ % ? #`を含むtitle、未作成page                                  |
-| 最新性           | test page更新直後に本文、`commitId`、`updated`が変わること。保証値にはしない                           |
-| full-text        | AND、OR、pageRank、updated、limit slice、empty result                                                  |
-| vector           | semantic query、score順、`exists:false`、limit slice                                                   |
-| related          | 1-hop、2-hop、search、OR、relation、pagination metadata、empty result                                  |
-| response         | raw巨大responseやuser emailを返さない                                                                  |
-| read-only        | registered toolが4つだけ、GET以外が存在しない                                                          |
-| boundary         | arbitrary project、arbitrary URL、file fetchをschema上も実装上も受け付けない                           |
-| cache            | upstream subrequestとMCP responseがno-store、Cosense本文を永続化しない                                 |
-| Access assertion | 欠落、別application audience、期限切れを拒否し、正しいassertionだけtools/listへ到達                    |
-| protocol         | MCP Inspectorでdiscovery/list/call、current headers、JSON response、`resultType` / cache hintsを確認   |
-| ChatGPT          | Developer modeからOne-time PIN、tool discovery、PAT認証済みのPublic / Private read callを確認          |
+| 対象             | 確認内容                                                                                             |
+| ---------------- | ---------------------------------------------------------------------------------------------------- |
+| PAT設定          | `COSENSE_PAT` の欠落と空白だけの値でfail closedになり、Cosense fetchを行わない                       |
+| PAT送信          | 6 toolの全GETへ `x-personal-access-token` を送り、Public / Privateで分岐しない                       |
+| PAT error        | upstreamの `401` / `403` を同じ認証失敗として返し、PATとupstream bodyをresponse / logへ含めない      |
+| `get_page`       | `日記`、`2026-08-11`、日本語、space、`/ % ? #`を含むtitle、未作成page                                |
+| 最新性           | test page更新直後に本文、`commitId`、`updated`が変わること。保証値にはしない                         |
+| full-text        | AND、OR、pageRank、updated、limit slice、empty result                                                |
+| vector           | semantic query、score順、`exists:false`、limit slice                                                 |
+| related          | 1-hop、2-hop、search、OR、relation、pagination metadata、empty result                                |
+| page list        | sort、limit 1–20、skip、nextSkip、empty result。1 callが一覧GET 1件だけで、detail GETを行わない      |
+| page changes     | pageId、任意commitId、title/insert/update/delete、actor名、50件上限、500文字切り詰め、empty result   |
+| request境界      | changesはcommits/usersの並列2 GETだけ。自動pagination、N+1、retry、他pageへの展開を行わない          |
+| response         | raw巨大responseやuser emailを返さない                                                                |
+| read-only        | registered toolが6つだけ、GET以外が存在しない                                                        |
+| boundary         | arbitrary project、arbitrary URL、file fetchをschema上も実装上も受け付けない                         |
+| cache            | upstream subrequestとMCP responseがno-store、Cosense本文を永続化しない                               |
+| Access assertion | 欠落、別application audience、期限切れを拒否し、正しいassertionだけtools/listへ到達                  |
+| protocol         | MCP Inspectorでdiscovery/list/call、current headers、JSON response、`resultType` / cache hintsを確認 |
+| ChatGPT          | Developer modeからOne-time PIN、tool discovery、PAT認証済みのPublic / Private read callを確認        |
 
-2026-08-13に実PATを一時的なprocess環境変数から渡し、local MCP tool layer経由でPublicの `shiyui` を確認した。PATはfile、command引数、log、結果へ保存していない。
+2026-08-13に実PATを一時的なprocess環境変数から渡し、当時の4 toolをlocal MCP tool layer経由でPublicの `shiyui` に対して確認した。PATはfile、command引数、log、結果へ保存していない。追加した `list_pages` と `get_page_changes` のlive確認結果ではない。
 
 | call                      | 結果 | returned |
 | ------------------------- | ---- | -------: |
@@ -521,22 +558,22 @@ deploy前にformat check、typecheck、test、`wrangler deploy --dry-run` を通
 
 ## Maintenance risk
 
-| risk                         | 影響                                     | 対応                                                                                 |
-| ---------------------------- | ---------------------------------------- | ------------------------------------------------------------------------------------ |
-| Cosense内部APIの予告なし変更 | field/path/queryが壊れる                 | endpointを4系統に限定、used fieldだけ検証、明確に失敗、公式CLI/releaseを更新時に確認 |
-| vector/full-text index遅延   | 検索直後に新pageが出ない                 | 候補選択後は必ずPages v2。SLAを約束しない                                            |
-| response上限の変更           | 検索候補が欠落                           | observed valueを仕様化せず、returned/truncatedを返す                                 |
-| related pagination変更       | 続きの候補が取れない                     | `perPage=limit`、`hasNext/nextId`をopaque cursorとして往復                           |
-| rate limit非公開             | 429や一時失敗                            | 1 call 1–2 request、N+1回避。429を明示し、無制限retryしない                          |
-| PAT失効・header仕様変更      | 全toolのCosense GETが失敗                | 401/403を安全な認証失敗へ変換し、公式CLI source確認後に手動再発行・Secret差し替え    |
-| PAT漏洩                      | user権限の範囲でCosense dataへアクセス   | Cloudflare Secretだけに保存し、input、response、log、Gitへ出さない                   |
-| OAuth / MCPの変更            | ChatGPT接続が壊れる                      | Cloudflare Accessとcurrent SDKへ委譲し、独自互換layerを足さない                      |
-| Access設定の誤り             | 意図しない利用者への公開、または接続失敗 | exact email 1件、One-time PINのみ、team domain、Application Audienceを確認           |
-| ChatGPT protocol revision差  | discovery/call不成立                     | 実利用で確認し、観測した問題だけを直す                                               |
+| risk                         | 影響                                     | 対応                                                                                     |
+| ---------------------------- | ---------------------------------------- | ---------------------------------------------------------------------------------------- |
+| Cosense内部APIの予告なし変更 | field/path/queryが壊れる                 | 必要なread pathだけに限定、used fieldだけ検証、明確に失敗、公式CLI/releaseを更新時に確認 |
+| vector/full-text index遅延   | 検索直後に新pageが出ない                 | 候補選択後は必ずPages v2。SLAを約束しない                                                |
+| response上限の変更           | 検索候補が欠落                           | observed valueを仕様化せず、returned/truncatedを返す                                     |
+| related pagination変更       | 続きの候補が取れない                     | `perPage=limit`、`hasNext/nextId`をopaque cursorとして往復                               |
+| rate limit非公開             | 429や一時失敗                            | 1 call 1–2 request、N+1回避。429を明示し、無制限retryしない                              |
+| PAT失効・header仕様変更      | 全toolのCosense GETが失敗                | 401/403を安全な認証失敗へ変換し、公式CLI source確認後に手動再発行・Secret差し替え        |
+| PAT漏洩                      | user権限の範囲でCosense dataへアクセス   | Cloudflare Secretだけに保存し、input、response、log、Gitへ出さない                       |
+| OAuth / MCPの変更            | ChatGPT接続が壊れる                      | Cloudflare Accessとcurrent SDKへ委譲し、独自互換layerを足さない                          |
+| Access設定の誤り             | 意図しない利用者への公開、または接続失敗 | exact email 1件、One-time PINのみ、team domain、Application Audienceを確認               |
+| ChatGPT protocol revision差  | discovery/call不成立                     | 実利用で確認し、観測した問題だけを直す                                                   |
 
 ## 確定した設計
 
-Cosense側はCloudflare Secret `COSENSE_PAT` を必須とし、Public / Privateを同じPAT付きGETで読む。未設定・空はfail closed、upstreamの `401` / `403` はtokenとbodyを含まない認証失敗にする。toolは上記4つだけで、write、任意project、任意URL、本文cache、credential fallbackを持たない。MCP clientの本人確認は従来どおりCloudflare Access Managed OAuth、許可email 1件、One-time PINとする。
+Cosense側はCloudflare Secret `COSENSE_PAT` を必須とし、Public / Privateを同じPAT付きGETで読む。未設定・空はfail closed、upstreamの `401` / `403` はtokenとbodyを含まない認証失敗にする。toolは上記6つだけで、write、任意project、任意URL、本文cache、credential fallbackを持たない。`list_pages` は一覧GET 1件、`get_page_changes` は対象pageのcommits/users並列2 GETだけとし、自動pagination、N+1、retry、他pageへの展開を行わない。MCP clientの本人確認は従来どおりCloudflare Access Managed OAuth、許可email 1件、One-time PINとする。
 
 ## 調査成果物20項目の対応
 
@@ -552,7 +589,7 @@ Cosense側はCloudflare Secret `COSENSE_PAT` を必須とし、Public / Private�
 |    13 | related / hop / Smart Context | 同名節                                            |
 |    14 | 2026年release                 | 「2026年の関連release」                           |
 |    15 | 最新性 / cache / index        | 同名節                                            |
-| 16–17 | 採用 / 不採用                 | tool仕様、v1不採用表                              |
+| 16–17 | 採用 / 不採用                 | tool仕様、現行MCPへ採用しない機能                 |
 |    18 | credential比較                | credential選択表                                  |
 |    19 | 推奨最終構成                  | 結論、Cloudflare architecture                     |
 |    20 | maintenance risk              | risk表                                            |

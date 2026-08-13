@@ -7,7 +7,7 @@
 - PATが未設定または空ならCosenseへ接続せず失敗
 - Public / Private pageを同じ認証経路で取得
 - MCPはCloudflare Access Managed OAuthで保護
-- 4つのread-only toolだけを公開し、write、任意project、任意URL、cacheは持たない
+- 6つのread-only toolだけを公開し、write、任意project、任意URL、cacheは持たない
 
 ## Tools
 
@@ -17,8 +17,14 @@
 | `search_full_text`  | 通常本文を全文検索                  |
 | `search_vector`     | titleと本文中link記法をsemantic検索 |
 | `get_related_pages` | 1-hop / 2-hopの関連pageを取得       |
+| `list_pages`        | page metadataを一覧取得             |
+| `get_page_changes`  | 1 pageの変更履歴を取得              |
 
 project、origin、URL、HTTP header、credential、file pathはtool引数に含めない。
+
+`list_pages` は `sort`、1–20の `limit`、明示的な `skip` を受け取り、一覧APIへの1 GETだけで完結する。page detailのN+1取得と自動paginationは行わない。
+
+`get_page_changes` は `get_page` が返す `pageId` と任意の `commitId` を受け取る。対象pageのcommitsとactor名解決用のproject usersを2 GETで並列取得し、他page、page本文、関連pageへ広げない。最新50件の変更に限定し、変更前後のtextは各500文字までとする。actorはnameだけを返し、email、user ID、line IDは返さない。
 
 ## Requirements
 
@@ -105,14 +111,17 @@ ChatGPT Developer modeへ次を登録する。
 https://<worker-origin>/mcp
 ```
 
-初回接続でOne-time PIN認証を行い、4 toolの一覧と1回のread callを確認する。
+初回接続でOne-time PIN認証を行い、6 toolの一覧と1回のread callを確認する。
 
 ## Data boundary
 
 - Cosense requestは `GET` と `cache: "no-store"` だけを使用
 - 全Cosense GETへ `x-personal-access-token` を付与し、Public / Privateで分岐しない
 - MCP responseも `Cache-Control: no-store`
-- responseにpage author、email、line ID、raw API responseを含めない
+- responseにemail、user ID、line ID、raw API responseを含めない。変更履歴のactorはnameだけを返す
+- `list_pages` は1 GETだけとし、N+1取得、全件走査、自動paginationを行わない
+- `get_page_changes` は対象pageのcommitsとactor名解決用usersの2 GETだけとし、他pageへ広げない
+- 自動retry、polling、background同期、事前indexを行わない
 - PAT、OAuth token、Access assertion、page本文、queryをlogしない
 - `401` / `403` はtokenとupstream bodyを含まない認証失敗として返す
 - Cosense internal APIとPAT headerの利用方法は予告なく変更される可能性がある
