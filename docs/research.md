@@ -4,7 +4,7 @@
 
 設計更新: 2026-08-13（JST）
 
-状態: Cosense Personal Access Token（PAT）を必須とする実装へ更新し、既存4 toolについてPublicの `shiyui` に対するPAT付きlocal live smokeとProduction再deployを完了。`list_pages` と `get_page_changes` を追加したが、この2 toolのlive smokeとProduction deployは未実施。Cloudflare Access設定とMCP OAuth構成は変更していない。ChatGPTからのread callとPrivate projectでの確認も未実施。
+状態: Cosense Personal Access Token（PAT）を必須とする実装へ更新し、既存4 toolについてPublicの `shiyui` に対するPAT付きlocal live smokeを完了。`list_pages` と `get_page_changes` を加えた6-tool版もProductionへdeploy済みだが、追加2 toolのlive smokeは未実施。Cloudflare Access設定とMCP OAuth構成は変更していない。ChatGPTからのread callとPrivate projectでの確認も未実施。
 
 ## 結論
 
@@ -552,9 +552,9 @@ Managed OAuthのclient bearerはopaqueであり、Workerでdecodeしない。Acc
 
 5 callが発生させた6件のupstream GETすべてで、`x-personal-access-token` が入力されたPATと一致することもruntimeで検証した。これはlocalの実通信確認であり、Cloudflare Access経由、ChatGPT接続、Private projectのtool call成功を示すものではない。
 
-同日にPAT必須版をProductionへdeployした。`COSENSE_PAT` が `secret_text` bindingとして保持されていることと、未認証の `/mcp` requestが `401`、`no-store` で拒否されることを確認した。Secret値の取得・表示は行っていない。
+同日にPAT必須版をProductionへdeployし、その後6-tool版もVersion `494a0aed-57bf-4091-9be0-03f58726b843` として100%へ反映した。`COSENSE_PAT` が `secret_text` bindingとして保持されていることと、未認証の `/mcp` requestが `401`、`no-store` で拒否されることを確認した。Secret値の取得・表示は行っていない。
 
-deploy前にformat check、typecheck、test、`wrangler deploy --dry-run` を通し、`npx wrangler secret put COSENSE_PAT` で本番Secretを登録した。Production deploy後もCloudflare Accessの未認証拒否を確認した。次の実利用確認はChatGPTからのread callとし、callback URIはapp管理画面に表示された値をDCR allowlistへ登録する。
+初回deploy前に `npx wrangler secret put COSENSE_PAT` で本番Secretを登録した。各deploy前にformat check、typecheck、test、`wrangler deploy --dry-run` を通し、6-tool版のProduction deploy後もCloudflare Accessの未認証拒否を確認した。次の実利用確認は追加2 toolを含むChatGPTからのread callとし、callback URIはapp管理画面に表示された値をDCR allowlistへ登録する。
 
 ## Maintenance risk
 
