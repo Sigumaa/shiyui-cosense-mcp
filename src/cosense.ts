@@ -504,7 +504,7 @@ async function requestJson<T>(
   const response = await fetcher(url, {
     method: "GET",
     cache: "no-store",
-    redirect: "error",
+    redirect: "manual",
     headers: {
       Accept: "application/json",
       "x-personal-access-token": personalAccessToken,

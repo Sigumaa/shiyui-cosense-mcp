@@ -46,7 +46,7 @@ function createFixtureFetch(...fixtures: JsonFixture[]): {
 function expectAuthenticatedJsonGet(call: FetchCall): void {
   expect(call.init?.method).toBe("GET");
   expect(call.init?.cache).toBe("no-store");
-  expect(call.init?.redirect).toBe("error");
+  expect(call.init?.redirect).toBe("manual");
   expect(call.init?.signal).toBeDefined();
   expect(call.init).not.toHaveProperty("credentials");
   const headers = new Headers(call.init?.headers);
@@ -238,6 +238,43 @@ describe("request errors", () => {
       expect(response.bodyUsed).toBe(false);
     },
   );
+
+  it.each([301, 302])("does not follow HTTP %i redirects", async (status) => {
+    const location = "https://example.invalid/redirected";
+    const response = new Response("redirect details", {
+      status,
+      headers: { Location: location },
+    });
+    const jsonSpy = vi.spyOn(response, "json");
+    const textSpy = vi.spyOn(response, "text");
+    const calls: FetchCall[] = [];
+    const fetcher: typeof fetch = async (input, init) => {
+      const call = { url: String(input), init };
+      calls.push(call);
+      expectAuthenticatedJsonGet(call);
+      return response;
+    };
+
+    const error = await createCosenseClient(TEST_PERSONAL_ACCESS_TOKEN, fetcher)
+      .searchFullText({ query: "redirect query" })
+      .then(
+        () => undefined,
+        (reason: unknown) => reason,
+      );
+
+    expect(error).toBeInstanceOf(CosenseUpstreamError);
+    expect(error).toMatchObject({
+      name: "CosenseUpstreamError",
+      status,
+      operation: "full-text search",
+      message: `Cosense full-text search request failed with status ${status}.`,
+    });
+    expect(calls).toHaveLength(1);
+    expect(String(error)).not.toContain(location);
+    expect(jsonSpy).not.toHaveBeenCalled();
+    expect(textSpy).not.toHaveBeenCalled();
+    expect(response.bodyUsed).toBe(false);
+  });
 
   it("does not read or expose a non-2xx response body", async () => {
     const response = new Response("secret upstream details", { status: 429 });
