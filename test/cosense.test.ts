@@ -46,6 +46,7 @@ function createFixtureFetch(...fixtures: JsonFixture[]): {
 function expectAuthenticatedJsonGet(call: FetchCall): void {
   expect(call.init?.method).toBe("GET");
   expect(call.init?.cache).toBe("no-store");
+  expect(call.init?.redirect).toBe("error");
   expect(call.init?.signal).toBeDefined();
   expect(call.init).not.toHaveProperty("credentials");
   const headers = new Headers(call.init?.headers);
