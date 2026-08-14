@@ -1,4 +1,6 @@
-# Cosense read-only Remote MCP 調査報告
+# Cosense read-only版 Remote MCP 調査報告
+
+> 2026-08-13までのread-only版の調査スナップショット。現在のwrite設計は [write-design.md](write-design.md) を参照する。
 
 調査日: 2026-08-12（JST）
 

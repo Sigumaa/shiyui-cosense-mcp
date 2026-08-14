@@ -7,6 +7,8 @@ const MAX_INPUT_LENGTH = 500;
 const MAX_CHANGE_EVENTS = 50;
 const MAX_CHANGE_TEXT_LENGTH = 500;
 const MAX_AUTHOR_LENGTH = 200;
+const MAX_WRITE_TEXT_LENGTH = 10_000;
+const MAX_WRITE_LINES = 100;
 const REQUEST_TIMEOUT_MS = 15_000;
 
 const nonBlankString = z
@@ -78,6 +80,81 @@ const getPageChangesInputSchema = z
   })
   .strict();
 
+const writeTextSchema = z
+  .string()
+  .max(MAX_WRITE_TEXT_LENGTH)
+  .refine((value) => value.trim().length > 0, {
+    message: "Must not be blank",
+  })
+  .refine((value) => !value.includes("\0"), {
+    message: "Must not contain NUL",
+  })
+  .refine((value) => value.split(/\r?\n/).length <= MAX_WRITE_LINES, {
+    message: `Must not contain more than ${MAX_WRITE_LINES} lines`,
+  });
+const writeTitleSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(MAX_INPUT_LENGTH)
+  .refine((value) => value !== "." && value !== "..", {
+    message: "Dot-segment titles are not supported",
+  })
+  .refine((value) => !/[\r\n\0]/.test(value), {
+    message: "Must not contain CR, LF, or NUL",
+  });
+const writeCommitIdSchema = z.string().trim().min(1).max(MAX_INPUT_LENGTH);
+
+const createPageInputSchema = z
+  .object({
+    title: writeTitleSchema,
+    text: writeTextSchema,
+  })
+  .strict();
+
+const appendToPageInputSchema = z
+  .object({
+    title: writeTitleSchema,
+    text: writeTextSchema,
+    expectedCommitId: writeCommitIdSchema,
+  })
+  .strict();
+
+const updateBodySchema = z
+  .string()
+  .max(MAX_WRITE_TEXT_LENGTH)
+  .refine((value) => !value.includes("\0"), {
+    message: "Must not contain NUL",
+  })
+  .refine(
+    (value) => value === "" || value.split(/\r?\n/).length <= MAX_WRITE_LINES,
+    { message: `Must not contain more than ${MAX_WRITE_LINES} lines` },
+  );
+
+const updatePageInputSchema = z
+  .object({
+    title: writeTitleSchema,
+    expectedCommitId: writeCommitIdSchema,
+    body: updateBodySchema.optional(),
+    newTitle: writeTitleSchema.optional(),
+  })
+  .strict()
+  .refine((input) => input.body !== undefined || input.newTitle !== undefined, {
+    message: "At least one of body or newTitle is required",
+  });
+
+const replaceLinksInputSchema = z
+  .object({
+    fromTitle: writeTitleSchema,
+    toTitle: writeTitleSchema,
+  })
+  .strict()
+  .refine(
+    (input) =>
+      normalizeTitle(input.fromTitle) !== normalizeTitle(input.toTitle),
+    { message: "fromTitle and toTitle must refer to different titles" },
+  );
+
 const missingPageSchema = z.object({
   persistent: z.literal(false),
   title: z.string(),
@@ -95,6 +172,26 @@ const existingPageSchema = z.object({
   linked: z.number().finite().optional(),
   links: z.array(z.string()).optional(),
 });
+
+const editableExistingPageSchema = z.object({
+  persistent: z.literal(true),
+  title: z.string(),
+  id: z.string().min(1),
+  commitId: z.string().min(1),
+  lines: z
+    .array(
+      z.object({
+        id: z.string().min(1),
+        text: z.string(),
+      }),
+    )
+    .min(1),
+});
+
+const editablePageResponseSchema = z.discriminatedUnion("persistent", [
+  missingPageSchema,
+  editableExistingPageSchema,
+]);
 
 const pageResponseSchema = z.discriminatedUnion("persistent", [
   missingPageSchema,
@@ -238,6 +335,34 @@ const usersResponseSchema = z.object({
     .optional(),
   serviceAccounts: z.array(serviceAccountEntrySchema).optional(),
   serviceAccountSnapshots: z.array(serviceAccountEntrySchema).optional(),
+});
+
+const editPreviewResponseSchema = z.object({
+  previewId: z.string().min(1).max(MAX_INPUT_LENGTH),
+  expireAt: z.string().min(1),
+  pagePreview: z.object({
+    title: z.string(),
+    persistent: z.boolean(),
+    lines: z.array(
+      z.object({
+        id: z.string().min(1),
+        text: z.string(),
+      }),
+    ),
+  }),
+});
+
+const editSubmitResponseSchema = z.object({
+  commitId: z.string().min(1).max(MAX_INPUT_LENGTH),
+  page: z.object({ title: z.string() }),
+});
+
+const editConflictResponseSchema = z.object({
+  error: z.enum(["NotFastForward", "DuplicateTitle"]),
+});
+
+const replaceLinksResponseSchema = z.object({
+  message: z.string().max(MAX_INPUT_LENGTH),
 });
 
 export type MatchMode = "and" | "or";
@@ -402,6 +527,74 @@ export interface GetPageChangesResult {
   changes: PageChangeResultItem[];
 }
 
+export interface CreatePageInput {
+  title: string;
+  text: string;
+}
+
+export interface AppendToPageInput {
+  title: string;
+  text: string;
+  expectedCommitId: string;
+}
+
+export interface UpdatePageInput {
+  title: string;
+  expectedCommitId: string;
+  body?: string | undefined;
+  newTitle?: string | undefined;
+}
+
+export interface ReplaceLinksInput {
+  fromTitle: string;
+  toTitle: string;
+}
+
+export interface CreatePageResult {
+  action: "create";
+  title: string;
+  canonicalUrl: string;
+  commitId: string;
+  addedLines: number;
+}
+
+export interface AppendToPageResult {
+  action: "append";
+  title: string;
+  canonicalUrl: string;
+  commitId: string;
+  previousCommitId: string;
+  addedLines: number;
+}
+
+export interface UpdatePageResult {
+  action: "update";
+  previousTitle: string;
+  title: string;
+  canonicalUrl: string;
+  previousCommitId: string;
+  commitId: string;
+  changed: boolean;
+  titleChanged: boolean;
+  bodyChanged: boolean;
+}
+
+export interface ReplaceLinksResult {
+  action: "replace-links";
+  fromTitle: string;
+  toTitle: string;
+  message: string;
+}
+
+export type CosenseWriteConflictReason =
+  | "page-already-exists"
+  | "page-missing"
+  | "page-renamed"
+  | "stale-commit"
+  | "page-replaced"
+  | "not-fast-forward"
+  | "duplicate-title";
+
 export class CosenseUpstreamError extends Error {
   readonly status: number;
   readonly operation: string;
@@ -436,6 +629,50 @@ export class CosenseResponseError extends Error {
   }
 }
 
+export class CosenseWriteConflictError extends Error {
+  readonly reason: CosenseWriteConflictReason;
+  readonly operation: string;
+  readonly status: 409 | undefined;
+
+  constructor(
+    reason: CosenseWriteConflictReason,
+    operation: string,
+    status?: 409,
+  ) {
+    super("Cosense write conflict. Refresh the page before trying again.");
+    this.name = "CosenseWriteConflictError";
+    this.reason = reason;
+    this.operation = operation;
+    this.status = status;
+  }
+}
+
+export class CosenseWriteOutcomeUnknownError extends Error {
+  readonly operation: "page edit submit";
+
+  constructor(cause: unknown) {
+    super(
+      "Cosense page edit outcome is unknown. Check the page before trying again.",
+      { cause },
+    );
+    this.name = "CosenseWriteOutcomeUnknownError";
+    this.operation = "page edit submit";
+  }
+}
+
+export class CosenseReplaceLinksRetryableError extends Error {
+  readonly operation: "replace links";
+
+  constructor(cause: unknown) {
+    super(
+      "Cosense link replacement did not return a reliable result. Retry with the exact same titles.",
+      { cause },
+    );
+    this.name = "CosenseReplaceLinksRetryableError";
+    this.operation = "replace links";
+  }
+}
+
 export interface CosenseClient {
   getPage(input: GetPageInput, signal?: AbortSignal): Promise<GetPageResult>;
   searchFullText(
@@ -458,6 +695,22 @@ export interface CosenseClient {
     input: GetPageChangesInput,
     signal?: AbortSignal,
   ): Promise<GetPageChangesResult>;
+  createPage(
+    input: CreatePageInput,
+    signal?: AbortSignal,
+  ): Promise<CreatePageResult>;
+  appendToPage(
+    input: AppendToPageInput,
+    signal?: AbortSignal,
+  ): Promise<AppendToPageResult>;
+  updatePage(
+    input: UpdatePageInput,
+    signal?: AbortSignal,
+  ): Promise<UpdatePageResult>;
+  replaceLinks(
+    input: ReplaceLinksInput,
+    signal?: AbortSignal,
+  ): Promise<ReplaceLinksResult>;
 }
 
 type Fetcher = typeof fetch;
@@ -496,11 +749,7 @@ async function requestJson<T>(
   schema: z.ZodType<T>,
   signal?: AbortSignal,
 ): Promise<T> {
-  const timeoutSignal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
-  const requestSignal =
-    signal === undefined
-      ? timeoutSignal
-      : AbortSignal.any([signal, timeoutSignal]);
+  const requestSignal = makeRequestSignal(signal);
   const response = await fetcher(url, {
     method: "GET",
     cache: "no-store",
@@ -525,6 +774,378 @@ async function requestJson<T>(
     if (requestSignal.aborted) throw requestSignal.reason;
     throw new CosenseResponseError(operation, error);
   }
+}
+
+function makeRequestSignal(signal?: AbortSignal): AbortSignal {
+  const timeoutSignal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+  return signal === undefined
+    ? timeoutSignal
+    : AbortSignal.any([signal, timeoutSignal]);
+}
+
+async function parseWriteConflict(
+  response: Response,
+  operation: string,
+): Promise<CosenseWriteConflictError | undefined> {
+  if (response.status !== 409) return undefined;
+
+  try {
+    const body = editConflictResponseSchema.parse(await response.json());
+    return new CosenseWriteConflictError(
+      body.error === "NotFastForward" ? "not-fast-forward" : "duplicate-title",
+      operation,
+      409,
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+async function requestWriteJson<T>(
+  fetcher: Fetcher,
+  personalAccessToken: string,
+  url: string,
+  operation: string,
+  body: unknown,
+  schema: z.ZodType<T>,
+  outcomeCanBeUnknown: boolean,
+  signal?: AbortSignal,
+): Promise<T> {
+  const requestSignal = makeRequestSignal(signal);
+  let response: Response;
+  try {
+    response = await fetcher(url, {
+      method: "POST",
+      cache: "no-store",
+      redirect: "manual",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "x-personal-access-token": personalAccessToken,
+      },
+      body: JSON.stringify(body),
+      signal: requestSignal,
+    });
+  } catch (error) {
+    if (outcomeCanBeUnknown) {
+      throw new CosenseWriteOutcomeUnknownError(error);
+    }
+    throw error;
+  }
+
+  if (!response.ok) {
+    if (response.status === 401 || response.status === 403) {
+      throw new CosenseAuthenticationError(response.status, operation);
+    }
+    const conflict = await parseWriteConflict(response, operation);
+    if (conflict !== undefined) throw conflict;
+    if (outcomeCanBeUnknown && response.status >= 500) {
+      throw new CosenseWriteOutcomeUnknownError(
+        new CosenseUpstreamError(response.status, operation),
+      );
+    }
+    throw new CosenseUpstreamError(response.status, operation);
+  }
+
+  try {
+    return schema.parse(await response.json());
+  } catch (error) {
+    if (outcomeCanBeUnknown) {
+      throw new CosenseWriteOutcomeUnknownError(error);
+    }
+    if (requestSignal.aborted) throw requestSignal.reason;
+    throw new CosenseResponseError(operation, error);
+  }
+}
+
+async function requestReplaceLinks(
+  fetcher: Fetcher,
+  personalAccessToken: string,
+  body: { from: string; to: string },
+  signal?: AbortSignal,
+): Promise<z.infer<typeof replaceLinksResponseSchema>> {
+  const operation = "replace links";
+  const requestSignal = makeRequestSignal(signal);
+  let response: Response;
+  try {
+    response = await fetcher(apiUrl(`/api/pages/${PROJECT}/replace/links`), {
+      method: "POST",
+      cache: "no-store",
+      redirect: "manual",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "x-personal-access-token": personalAccessToken,
+      },
+      body: JSON.stringify(body),
+      signal: requestSignal,
+    });
+  } catch (error) {
+    throw new CosenseReplaceLinksRetryableError(error);
+  }
+
+  if (!response.ok) {
+    if (response.status === 401 || response.status === 403) {
+      throw new CosenseAuthenticationError(response.status, operation);
+    }
+    if (response.status >= 500) {
+      throw new CosenseReplaceLinksRetryableError(
+        new CosenseUpstreamError(response.status, operation),
+      );
+    }
+    throw new CosenseUpstreamError(response.status, operation);
+  }
+
+  try {
+    return replaceLinksResponseSchema.parse(await response.json());
+  } catch (error) {
+    throw new CosenseReplaceLinksRetryableError(error);
+  }
+}
+
+function newLineId(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(12));
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
+    "",
+  );
+}
+
+type InsertChange = {
+  _insert: string;
+  lines: { id: string; text: string };
+};
+
+type UpdateChange = {
+  _update: string;
+  lines: { text: string };
+};
+
+type DeleteChange = {
+  _delete: string;
+};
+
+type PageEditChange = InsertChange | UpdateChange | DeleteChange;
+
+type EditableLine = z.infer<typeof editableExistingPageSchema>["lines"][number];
+
+function makeInsertChanges(
+  lines: string[],
+  insertBefore = "_end",
+): InsertChange[] {
+  return lines.map((text) => ({
+    _insert: insertBefore,
+    lines: { id: newLineId(), text },
+  }));
+}
+
+function assertPreviewLines(
+  preview: z.infer<typeof editPreviewResponseSchema>,
+  expected: {
+    title: string;
+    persistent: boolean;
+    lines: EditableLine[];
+  },
+): void {
+  const actual = preview.pagePreview;
+  const linesMatch =
+    actual.lines.length === expected.lines.length &&
+    actual.lines.every((line, index) => {
+      const expectedLine = expected.lines[index];
+      return line.id === expectedLine?.id && line.text === expectedLine.text;
+    });
+
+  if (
+    actual.title !== expected.title ||
+    actual.persistent !== expected.persistent ||
+    !linesMatch
+  ) {
+    throw new CosenseResponseError(
+      "page edit preview",
+      new Error("Preview did not match the requested edit."),
+    );
+  }
+}
+
+async function requestPageForWrite(
+  fetcher: Fetcher,
+  personalAccessToken: string,
+  title: string,
+  operation: string,
+  signal?: AbortSignal,
+): Promise<z.infer<typeof pageResponseSchema> | undefined> {
+  try {
+    return await requestJson(
+      fetcher,
+      personalAccessToken,
+      apiUrl(pagePath(title)),
+      operation,
+      pageResponseSchema,
+      signal,
+    );
+  } catch (error) {
+    if (error instanceof CosenseUpstreamError && error.status === 404) {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+async function requestEditablePageForWrite(
+  fetcher: Fetcher,
+  personalAccessToken: string,
+  title: string,
+  operation: string,
+  signal?: AbortSignal,
+): Promise<z.infer<typeof editablePageResponseSchema> | undefined> {
+  try {
+    return await requestJson(
+      fetcher,
+      personalAccessToken,
+      apiUrl(pagePath(title)),
+      operation,
+      editablePageResponseSchema,
+      signal,
+    );
+  } catch (error) {
+    if (error instanceof CosenseUpstreamError && error.status === 404) {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+function requireEditableTarget(
+  page: z.infer<typeof editablePageResponseSchema> | undefined,
+  title: string,
+  expectedCommitId: string,
+  operation: "page append" | "page update",
+  expectedPageId?: string,
+): z.infer<typeof editableExistingPageSchema> {
+  if (page === undefined || !page.persistent) {
+    throw new CosenseWriteConflictError("page-missing", operation);
+  }
+  if (page.title !== title) {
+    throw new CosenseWriteConflictError("page-renamed", operation);
+  }
+  if (expectedPageId !== undefined && page.id !== expectedPageId) {
+    throw new CosenseWriteConflictError("page-replaced", operation);
+  }
+  if (page.commitId !== expectedCommitId) {
+    throw new CosenseWriteConflictError("stale-commit", operation);
+  }
+  if (page.lines[0]?.text !== page.title) {
+    throw new CosenseResponseError(
+      operation,
+      new Error("Editable page title line did not match the page title."),
+    );
+  }
+  return page;
+}
+
+interface UpdatePlan {
+  desiredTitle: string;
+  changes: PageEditChange[];
+  expectedLines: EditableLine[];
+  titleChanged: boolean;
+  bodyChanged: boolean;
+}
+
+function buildUpdatePlan(
+  page: z.infer<typeof editableExistingPageSchema>,
+  body: string | undefined,
+  newTitle: string | undefined,
+): UpdatePlan {
+  const titleLine = page.lines[0] as EditableLine;
+  const currentBody = page.lines.slice(1);
+  const desiredBodyTexts =
+    body === undefined
+      ? currentBody.map(({ text }) => text)
+      : body === ""
+        ? []
+        : body.split(/\r?\n/);
+  const desiredTitle = newTitle ?? page.title;
+  const titleChanged = desiredTitle !== page.title;
+  const bodyChanged =
+    desiredBodyTexts.length !== currentBody.length ||
+    desiredBodyTexts.some((text, index) => text !== currentBody[index]?.text);
+
+  let prefixLength = 0;
+  while (
+    prefixLength < currentBody.length &&
+    prefixLength < desiredBodyTexts.length &&
+    currentBody[prefixLength]?.text === desiredBodyTexts[prefixLength]
+  ) {
+    prefixLength += 1;
+  }
+
+  let suffixLength = 0;
+  while (
+    suffixLength < currentBody.length - prefixLength &&
+    suffixLength < desiredBodyTexts.length - prefixLength &&
+    currentBody[currentBody.length - 1 - suffixLength]?.text ===
+      desiredBodyTexts[desiredBodyTexts.length - 1 - suffixLength]
+  ) {
+    suffixLength += 1;
+  }
+
+  const oldMiddle = currentBody.slice(
+    prefixLength,
+    currentBody.length - suffixLength,
+  );
+  const newMiddle = desiredBodyTexts.slice(
+    prefixLength,
+    desiredBodyTexts.length - suffixLength,
+  );
+  const pairedLength = Math.min(oldMiddle.length, newMiddle.length);
+  const changes: PageEditChange[] = [];
+  const desiredMiddle: EditableLine[] = [];
+
+  if (titleChanged) {
+    changes.push({ _update: titleLine.id, lines: { text: desiredTitle } });
+  }
+
+  for (let index = 0; index < pairedLength; index += 1) {
+    const oldLine = oldMiddle[index] as EditableLine;
+    const text = newMiddle[index] as string;
+    desiredMiddle.push({ id: oldLine.id, text });
+    if (oldLine.text !== text) {
+      changes.push({ _update: oldLine.id, lines: { text } });
+    }
+  }
+
+  const insertAnchor =
+    suffixLength === 0
+      ? "_end"
+      : (currentBody[currentBody.length - suffixLength] as EditableLine).id;
+  const insertChanges = makeInsertChanges(
+    newMiddle.slice(pairedLength),
+    insertAnchor,
+  );
+  changes.push(...insertChanges);
+  desiredMiddle.push(...insertChanges.map(({ lines }) => lines));
+
+  for (const oldLine of oldMiddle.slice(pairedLength)) {
+    changes.push({ _delete: oldLine.id });
+  }
+
+  if (changes.length > MAX_WRITE_LINES) {
+    throw new Error(
+      `Page update must not require more than ${MAX_WRITE_LINES} changes.`,
+    );
+  }
+
+  return {
+    desiredTitle,
+    changes,
+    expectedLines: [
+      { id: titleLine.id, text: desiredTitle },
+      ...currentBody.slice(0, prefixLength),
+      ...desiredMiddle,
+      ...currentBody.slice(currentBody.length - suffixLength),
+    ],
+    titleChanged,
+    bodyChanged,
+  };
 }
 
 function makeRelatedUrl(input: {
@@ -1082,6 +1703,247 @@ export function createCosenseClient(
         changes: selectedEvents.map((event) =>
           mapPageChangeEvent(event, users),
         ),
+      };
+    },
+
+    async createPage(input, signal) {
+      const parsed = createPageInputSchema.parse(input);
+      const current = await requestPageForWrite(
+        fetcher,
+        personalAccessToken,
+        parsed.title,
+        "page create preflight",
+        signal,
+      );
+      if (current?.persistent) {
+        throw new CosenseWriteConflictError(
+          "page-already-exists",
+          "page create",
+        );
+      }
+
+      const lines = [parsed.title, ...parsed.text.split(/\r?\n/)];
+      const changes = makeInsertChanges(lines);
+      const preview = await requestWriteJson(
+        fetcher,
+        personalAccessToken,
+        apiUrl(`/api/pages/v2/${PROJECT}/page-edit-for-ai/preview`),
+        "page edit preview",
+        { changes },
+        editPreviewResponseSchema,
+        false,
+        signal,
+      );
+      assertPreviewLines(preview, {
+        title: parsed.title,
+        persistent: false,
+        lines: changes.map(({ lines }) => lines),
+      });
+
+      const rechecked = await requestPageForWrite(
+        fetcher,
+        personalAccessToken,
+        parsed.title,
+        "page create recheck",
+        signal,
+      );
+      if (rechecked?.persistent) {
+        throw new CosenseWriteConflictError(
+          "page-already-exists",
+          "page create",
+        );
+      }
+
+      const submitted = await requestWriteJson(
+        fetcher,
+        personalAccessToken,
+        apiUrl(`/api/pages/v2/${PROJECT}/page-edit-for-ai/submit`),
+        "page edit submit",
+        { previewId: preview.previewId },
+        editSubmitResponseSchema,
+        true,
+        signal,
+      );
+
+      return {
+        action: "create",
+        title: submitted.page.title,
+        canonicalUrl: canonicalUrl(submitted.page.title),
+        commitId: submitted.commitId,
+        addedLines: lines.length,
+      };
+    },
+
+    async appendToPage(input, signal) {
+      const parsed = appendToPageInputSchema.parse(input);
+      const current = requireEditableTarget(
+        await requestEditablePageForWrite(
+          fetcher,
+          personalAccessToken,
+          parsed.title,
+          "page append preflight",
+          signal,
+        ),
+        parsed.title,
+        parsed.expectedCommitId,
+        "page append",
+      );
+      const lines = parsed.text.split(/\r?\n/);
+      const changes = makeInsertChanges(lines);
+      const preview = await requestWriteJson(
+        fetcher,
+        personalAccessToken,
+        apiUrl(`/api/pages/v2/${PROJECT}/page-edit-for-ai/preview`),
+        "page edit preview",
+        { pageId: current.id, changes },
+        editPreviewResponseSchema,
+        false,
+        signal,
+      );
+      assertPreviewLines(preview, {
+        title: parsed.title,
+        persistent: true,
+        lines: [...current.lines, ...changes.map(({ lines }) => lines)],
+      });
+
+      requireEditableTarget(
+        await requestEditablePageForWrite(
+          fetcher,
+          personalAccessToken,
+          parsed.title,
+          "page append recheck",
+          signal,
+        ),
+        parsed.title,
+        parsed.expectedCommitId,
+        "page append",
+        current.id,
+      );
+
+      const submitted = await requestWriteJson(
+        fetcher,
+        personalAccessToken,
+        apiUrl(`/api/pages/v2/${PROJECT}/page-edit-for-ai/submit`),
+        "page edit submit",
+        { previewId: preview.previewId },
+        editSubmitResponseSchema,
+        true,
+        signal,
+      );
+
+      return {
+        action: "append",
+        title: submitted.page.title,
+        canonicalUrl: canonicalUrl(submitted.page.title),
+        commitId: submitted.commitId,
+        previousCommitId: parsed.expectedCommitId,
+        addedLines: lines.length,
+      };
+    },
+
+    async updatePage(input, signal) {
+      const parsed = updatePageInputSchema.parse(input);
+      const current = requireEditableTarget(
+        await requestEditablePageForWrite(
+          fetcher,
+          personalAccessToken,
+          parsed.title,
+          "page update preflight",
+          signal,
+        ),
+        parsed.title,
+        parsed.expectedCommitId,
+        "page update",
+      );
+      const plan = buildUpdatePlan(current, parsed.body, parsed.newTitle);
+
+      if (plan.changes.length === 0) {
+        return {
+          action: "update",
+          previousTitle: current.title,
+          title: current.title,
+          canonicalUrl: canonicalUrl(current.title),
+          previousCommitId: current.commitId,
+          commitId: current.commitId,
+          changed: false,
+          titleChanged: false,
+          bodyChanged: false,
+        };
+      }
+
+      const preview = await requestWriteJson(
+        fetcher,
+        personalAccessToken,
+        apiUrl(`/api/pages/v2/${PROJECT}/page-edit-for-ai/preview`),
+        "page edit preview",
+        { pageId: current.id, changes: plan.changes },
+        editPreviewResponseSchema,
+        false,
+        signal,
+      );
+      if (
+        plan.titleChanged &&
+        preview.pagePreview.title !== plan.desiredTitle
+      ) {
+        throw new CosenseWriteConflictError("duplicate-title", "page update");
+      }
+      assertPreviewLines(preview, {
+        title: plan.desiredTitle,
+        persistent: true,
+        lines: plan.expectedLines,
+      });
+
+      requireEditableTarget(
+        await requestEditablePageForWrite(
+          fetcher,
+          personalAccessToken,
+          parsed.title,
+          "page update recheck",
+          signal,
+        ),
+        parsed.title,
+        parsed.expectedCommitId,
+        "page update",
+        current.id,
+      );
+
+      const submitted = await requestWriteJson(
+        fetcher,
+        personalAccessToken,
+        apiUrl(`/api/pages/v2/${PROJECT}/page-edit-for-ai/submit`),
+        "page edit submit",
+        { previewId: preview.previewId },
+        editSubmitResponseSchema,
+        true,
+        signal,
+      );
+
+      return {
+        action: "update",
+        previousTitle: current.title,
+        title: submitted.page.title,
+        canonicalUrl: canonicalUrl(submitted.page.title),
+        previousCommitId: current.commitId,
+        commitId: submitted.commitId,
+        changed: true,
+        titleChanged: plan.titleChanged,
+        bodyChanged: plan.bodyChanged,
+      };
+    },
+
+    async replaceLinks(input, signal) {
+      const parsed = replaceLinksInputSchema.parse(input);
+      const response = await requestReplaceLinks(
+        fetcher,
+        personalAccessToken,
+        { from: parsed.fromTitle, to: parsed.toTitle },
+        signal,
+      );
+      return {
+        action: "replace-links",
+        fromTitle: parsed.fromTitle,
+        toTitle: parsed.toTitle,
+        message: response.message,
       };
     },
   };

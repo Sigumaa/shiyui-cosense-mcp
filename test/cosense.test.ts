@@ -2,8 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   CosenseAuthenticationError,
+  CosenseReplaceLinksRetryableError,
   CosenseResponseError,
   CosenseUpstreamError,
+  CosenseWriteConflictError,
+  CosenseWriteOutcomeUnknownError,
   createCosenseClient,
 } from "../src/cosense";
 
@@ -57,6 +60,171 @@ function expectAuthenticatedJsonGet(call: FetchCall): void {
     TEST_PERSONAL_ACCESS_TOKEN,
   );
   expect(headers.has("x-service-account-access-key")).toBe(false);
+}
+
+interface WriteFixture {
+  method: "GET" | "POST";
+  body?: unknown | ((call: FetchCall) => unknown);
+  status?: number;
+  error?: unknown;
+}
+
+function createWriteFixtureFetch(...fixtures: WriteFixture[]): {
+  fetcher: typeof fetch;
+  calls: FetchCall[];
+} {
+  const calls: FetchCall[] = [];
+  let fixtureIndex = 0;
+  const fetcher: typeof fetch = async (input, init) => {
+    const call = { url: String(input), init };
+    calls.push(call);
+    const fixture = fixtures[fixtureIndex];
+    fixtureIndex += 1;
+    if (!fixture) throw new Error("Unexpected fetch call");
+    expect(init?.method).toBe(fixture.method);
+    if (fixture.error !== undefined) throw fixture.error;
+    const body =
+      typeof fixture.body === "function" ? fixture.body(call) : fixture.body;
+    return new Response(body === undefined ? null : JSON.stringify(body), {
+      status: fixture.status ?? 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+  return { fetcher, calls };
+}
+
+function expectAuthenticatedJsonPost(call: FetchCall): void {
+  expect(call.init?.method).toBe("POST");
+  expect(call.init?.cache).toBe("no-store");
+  expect(call.init?.redirect).toBe("manual");
+  expect(call.init?.signal).toBeDefined();
+  expect(call.init).not.toHaveProperty("credentials");
+  const headers = new Headers(call.init?.headers);
+  expect(headers.get("accept")).toBe("application/json");
+  expect(headers.get("content-type")).toBe("application/json");
+  expect(headers.has("authorization")).toBe(false);
+  expect(headers.has("cookie")).toBe(false);
+  expect(headers.get("x-personal-access-token")).toBe(
+    TEST_PERSONAL_ACCESS_TOKEN,
+  );
+  expect(headers.has("x-service-account-access-key")).toBe(false);
+}
+
+function requestBody(call: FetchCall): Record<string, unknown> {
+  expect(call.init?.body).toEqual(expect.any(String));
+  return JSON.parse(call.init?.body as string) as Record<string, unknown>;
+}
+
+function missingPage(title: string): unknown {
+  return { persistent: false, title };
+}
+
+function existingPage(
+  title: string,
+  commitId = "commit-before",
+  id = "page-id",
+): unknown {
+  return {
+    persistent: true,
+    title,
+    id,
+    commitId,
+    lines: [
+      { id: "title-line", text: title },
+      { id: "body-line", text: "existing" },
+    ],
+  };
+}
+
+function editablePage(
+  title: string,
+  body: string[],
+  commitId = "commit-before",
+  id = "page-id",
+): unknown {
+  return {
+    persistent: true,
+    title,
+    id,
+    commitId,
+    lines: [
+      { id: "title-line", text: title },
+      ...body.map((text, index) => ({ id: `body-${index}`, text })),
+    ],
+  };
+}
+
+function appliedPreviewFromRequest(
+  call: FetchCall,
+  page: ReturnType<typeof editablePage>,
+): unknown {
+  const editable = page as {
+    persistent: true;
+    title: string;
+    lines: { id: string; text: string }[];
+  };
+  const lines = editable.lines.map((line) => ({ ...line }));
+  const changes = requestBody(call).changes as (
+    | { _insert: string; lines: { id: string; text: string } }
+    | { _update: string; lines: { text: string } }
+    | { _delete: string }
+  )[];
+
+  for (const change of changes) {
+    if ("_update" in change) {
+      const line = lines.find(({ id }) => id === change._update);
+      if (!line) throw new Error("Unknown update line in test fixture");
+      line.text = change.lines.text;
+    } else if ("_delete" in change) {
+      const index = lines.findIndex(({ id }) => id === change._delete);
+      if (index < 0) throw new Error("Unknown delete line in test fixture");
+      lines.splice(index, 1);
+    } else {
+      const index =
+        change._insert === "_end"
+          ? lines.length
+          : lines.findIndex(({ id }) => id === change._insert);
+      if (index < 0) throw new Error("Unknown insert anchor in test fixture");
+      lines.splice(index, 0, change.lines);
+    }
+  }
+
+  return {
+    previewId: "preview-id",
+    expireAt: "2026-08-14T01:02:03.000Z",
+    pagePreview: {
+      title: lines[0]?.text ?? "",
+      persistent: true,
+      lines,
+    },
+  };
+}
+
+function previewFromRequest(
+  call: FetchCall,
+  options: {
+    title: string;
+    persistent: boolean;
+    existingLines?: { id: string; text: string }[];
+  },
+): unknown {
+  const body = requestBody(call);
+  const changes = body.changes as {
+    _insert: string;
+    lines: { id: string; text: string };
+  }[];
+  return {
+    previewId: "preview-id",
+    expireAt: "2026-08-14T01:02:03.000Z",
+    pagePreview: {
+      title: options.title,
+      persistent: options.persistent,
+      lines: [
+        ...(options.existingLines ?? []),
+        ...changes.map(({ lines }) => lines),
+      ],
+    },
+  };
 }
 
 describe("getPage", () => {
@@ -1086,5 +1254,1015 @@ describe("getPageChanges", () => {
       client.getPageChanges({ pageId: "page-id", commitId: " \n " }),
     ).rejects.toThrow();
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe("createPage", () => {
+  it("uses GET, preview, GET, submit and creates the exact requested lines", async () => {
+    const title = "山形 /%?#";
+    const { fetcher, calls } = createWriteFixtureFetch(
+      { method: "GET", body: missingPage(title) },
+      {
+        method: "POST",
+        body: (call: FetchCall) => {
+          const body = requestBody(call);
+          expect(body).not.toHaveProperty("pageId");
+          const changes = body.changes as {
+            _insert: string;
+            lines: { id: string; text: string };
+          }[];
+          expect(changes.map(({ _insert }) => _insert)).toEqual([
+            "_end",
+            "_end",
+            "_end",
+          ]);
+          expect(changes.map(({ lines }) => lines.text)).toEqual([
+            title,
+            " 蔵王 ",
+            "銀山温泉",
+          ]);
+          expect(
+            changes.every(({ lines }) => /^[0-9a-f]{24}$/.test(lines.id)),
+          ).toBe(true);
+          expect(new Set(changes.map(({ lines }) => lines.id))).toHaveProperty(
+            "size",
+            3,
+          );
+          return previewFromRequest(call, { title, persistent: false });
+        },
+      },
+      { method: "GET", body: missingPage(title) },
+      {
+        method: "POST",
+        body: (call: FetchCall) => {
+          expect(requestBody(call)).toEqual({ previewId: "preview-id" });
+          return {
+            commitId: "commit-after",
+            page: { title },
+          };
+        },
+      },
+    );
+
+    const result = await createCosenseClient(
+      TEST_PERSONAL_ACCESS_TOKEN,
+      fetcher,
+    ).createPage({ title: `  ${title}  `, text: " 蔵王 \r\n銀山温泉" });
+
+    expect(calls).toHaveLength(4);
+    expect(calls.map(({ url }) => url)).toEqual([
+      "https://scrapbox.io/api/pages/v2/shiyui/%E5%B1%B1%E5%BD%A2%20%2F%25%3F%23",
+      "https://scrapbox.io/api/pages/v2/shiyui/page-edit-for-ai/preview",
+      "https://scrapbox.io/api/pages/v2/shiyui/%E5%B1%B1%E5%BD%A2%20%2F%25%3F%23",
+      "https://scrapbox.io/api/pages/v2/shiyui/page-edit-for-ai/submit",
+    ]);
+    expect(calls.map(({ init }) => init?.method)).toEqual([
+      "GET",
+      "POST",
+      "GET",
+      "POST",
+    ]);
+    expectAuthenticatedJsonGet(calls[0] as FetchCall);
+    expectAuthenticatedJsonPost(calls[1] as FetchCall);
+    expectAuthenticatedJsonGet(calls[2] as FetchCall);
+    expectAuthenticatedJsonPost(calls[3] as FetchCall);
+    expect(result).toEqual({
+      action: "create",
+      title,
+      canonicalUrl:
+        "https://scrapbox.io/shiyui/%E5%B1%B1%E5%BD%A2%20%2F%25%3F%23",
+      commitId: "commit-after",
+      addedLines: 3,
+    });
+  });
+
+  it("stops before preview when a persistent page already exists", async () => {
+    const { fetcher, calls } = createWriteFixtureFetch({
+      method: "GET",
+      body: existingPage("山形"),
+    });
+
+    await expect(
+      createCosenseClient(TEST_PERSONAL_ACCESS_TOKEN, fetcher).createPage({
+        title: "山形",
+        text: "行きたい",
+      }),
+    ).rejects.toMatchObject({
+      name: "CosenseWriteConflictError",
+      reason: "page-already-exists",
+      operation: "page create",
+    });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("stops before submit when the title appears after preview", async () => {
+    const title = "山形";
+    const { fetcher, calls } = createWriteFixtureFetch(
+      { method: "GET", body: missingPage(title) },
+      {
+        method: "POST",
+        body: (call: FetchCall) =>
+          previewFromRequest(call, { title, persistent: false }),
+      },
+      { method: "GET", body: existingPage(title) },
+    );
+
+    await expect(
+      createCosenseClient(TEST_PERSONAL_ACCESS_TOKEN, fetcher).createPage({
+        title,
+        text: "行きたい",
+      }),
+    ).rejects.toBeInstanceOf(CosenseWriteConflictError);
+    expect(calls).toHaveLength(3);
+  });
+
+  it("rejects a preview whose complete page does not match the request", async () => {
+    const title = "山形";
+    const { fetcher, calls } = createWriteFixtureFetch(
+      { method: "GET", body: missingPage(title) },
+      {
+        method: "POST",
+        body: {
+          previewId: "preview-id",
+          expireAt: "soon",
+          pagePreview: {
+            title,
+            persistent: false,
+            lines: [{ id: "line-id", text: title }],
+          },
+        },
+      },
+    );
+
+    await expect(
+      createCosenseClient(TEST_PERSONAL_ACCESS_TOKEN, fetcher).createPage({
+        title,
+        text: "missing from preview",
+      }),
+    ).rejects.toMatchObject({
+      name: "CosenseResponseError",
+      operation: "page edit preview",
+    });
+    expect(calls).toHaveLength(2);
+  });
+});
+
+describe("appendToPage", () => {
+  it("requires a fresh commit, verifies the preview tail, and rechecks before submit", async () => {
+    const title = "山形";
+    const current = existingPage(title);
+    const existingLines = [
+      { id: "title-line", text: title },
+      { id: "body-line", text: "existing" },
+    ];
+    const { fetcher, calls } = createWriteFixtureFetch(
+      { method: "GET", body: current },
+      {
+        method: "POST",
+        body: (call: FetchCall) => {
+          const body = requestBody(call);
+          expect(body.pageId).toBe("page-id");
+          const changes = body.changes as {
+            _insert: string;
+            lines: { id: string; text: string };
+          }[];
+          expect(changes.map(({ lines }) => lines.text)).toEqual([
+            " first ",
+            "second",
+            "",
+          ]);
+          return previewFromRequest(call, {
+            title,
+            persistent: true,
+            existingLines,
+          });
+        },
+      },
+      { method: "GET", body: current },
+      {
+        method: "POST",
+        body: {
+          commitId: "commit-after",
+          page: { title },
+        },
+      },
+    );
+
+    const result = await createCosenseClient(
+      TEST_PERSONAL_ACCESS_TOKEN,
+      fetcher,
+    ).appendToPage({
+      title,
+      text: " first \r\nsecond\n",
+      expectedCommitId: "  commit-before  ",
+    });
+
+    expect(calls).toHaveLength(4);
+    expect(calls.map(({ init }) => init?.method)).toEqual([
+      "GET",
+      "POST",
+      "GET",
+      "POST",
+    ]);
+    for (const call of [calls[0], calls[2]]) {
+      expectAuthenticatedJsonGet(call as FetchCall);
+    }
+    for (const call of [calls[1], calls[3]]) {
+      expectAuthenticatedJsonPost(call as FetchCall);
+    }
+    expect(result).toEqual({
+      action: "append",
+      title,
+      canonicalUrl: "https://scrapbox.io/shiyui/%E5%B1%B1%E5%BD%A2",
+      commitId: "commit-after",
+      previousCommitId: "commit-before",
+      addedLines: 3,
+    });
+  });
+
+  it.each([
+    [missingPage("山形"), "page-missing"],
+    [existingPage("renamed"), "page-renamed"],
+    [existingPage("山形", "newer-commit"), "stale-commit"],
+  ])("rejects an invalid initial target as %s", async (page, reason) => {
+    const { fetcher, calls } = createWriteFixtureFetch({
+      method: "GET",
+      body: page,
+    });
+
+    await expect(
+      createCosenseClient(TEST_PERSONAL_ACCESS_TOKEN, fetcher).appendToPage({
+        title: "山形",
+        text: "追記",
+        expectedCommitId: "commit-before",
+      }),
+    ).rejects.toMatchObject({
+      name: "CosenseWriteConflictError",
+      reason,
+    });
+    expect(calls).toHaveLength(1);
+  });
+
+  it.each([
+    [
+      existingPage("山形", "commit-before", "replacement-page-id"),
+      "page-replaced",
+    ],
+    [existingPage("山形", "newer-commit"), "stale-commit"],
+  ])(
+    "does not submit when the target changes after preview as %s",
+    async (recheckedPage, reason) => {
+      const title = "山形";
+      const { fetcher, calls } = createWriteFixtureFetch(
+        { method: "GET", body: existingPage(title) },
+        {
+          method: "POST",
+          body: (call: FetchCall) =>
+            previewFromRequest(call, {
+              title,
+              persistent: true,
+              existingLines: [
+                { id: "title-line", text: title },
+                { id: "body-line", text: "existing" },
+              ],
+            }),
+        },
+        { method: "GET", body: recheckedPage },
+      );
+
+      await expect(
+        createCosenseClient(TEST_PERSONAL_ACCESS_TOKEN, fetcher).appendToPage({
+          title,
+          text: "追記",
+          expectedCommitId: "commit-before",
+        }),
+      ).rejects.toMatchObject({
+        name: "CosenseWriteConflictError",
+        reason,
+      });
+      expect(calls).toHaveLength(3);
+    },
+  );
+
+  it("rejects an append preview whose tail does not match the requested text", async () => {
+    const title = "山形";
+    const { fetcher, calls } = createWriteFixtureFetch(
+      { method: "GET", body: existingPage(title) },
+      {
+        method: "POST",
+        body: {
+          previewId: "preview-id",
+          expireAt: "soon",
+          pagePreview: {
+            title,
+            persistent: true,
+            lines: [
+              { id: "title-line", text: title },
+              { id: "body-line", text: "different tail" },
+            ],
+          },
+        },
+      },
+    );
+
+    await expect(
+      createCosenseClient(TEST_PERSONAL_ACCESS_TOKEN, fetcher).appendToPage({
+        title,
+        text: "requested tail",
+        expectedCommitId: "commit-before",
+      }),
+    ).rejects.toMatchObject({
+      name: "CosenseResponseError",
+      operation: "page edit preview",
+    });
+    expect(calls).toHaveLength(2);
+  });
+});
+
+describe("updatePage", () => {
+  it("renames and minimally replaces and inserts body lines", async () => {
+    const current = editablePage("Old title", [
+      "keep",
+      "old one",
+      "old two",
+      "suffix",
+    ]);
+    const { fetcher, calls } = createWriteFixtureFetch(
+      { method: "GET", body: current },
+      {
+        method: "POST",
+        body: (call: FetchCall) => {
+          const body = requestBody(call);
+          expect(body.pageId).toBe("page-id");
+          const changes = body.changes as Record<string, unknown>[];
+          expect(changes).toHaveLength(4);
+          expect(changes[0]).toEqual({
+            _update: "title-line",
+            lines: { text: "New title" },
+          });
+          expect(changes[1]).toEqual({
+            _update: "body-1",
+            lines: { text: "new one" },
+          });
+          expect(changes[2]).toEqual({
+            _update: "body-2",
+            lines: { text: "new two" },
+          });
+          expect(changes[3]).toMatchObject({
+            _insert: "body-3",
+            lines: { text: "inserted" },
+          });
+          expect((changes[3]?.lines as { id: string }).id).toMatch(
+            /^[0-9a-f]{24}$/,
+          );
+          return appliedPreviewFromRequest(call, current);
+        },
+      },
+      { method: "GET", body: current },
+      {
+        method: "POST",
+        body: { commitId: "commit-after", page: { title: "New title" } },
+      },
+    );
+
+    const result = await createCosenseClient(
+      TEST_PERSONAL_ACCESS_TOKEN,
+      fetcher,
+    ).updatePage({
+      title: "Old title",
+      expectedCommitId: "commit-before",
+      newTitle: "  New title  ",
+      body: "keep\nnew one\nnew two\ninserted\nsuffix",
+    });
+
+    expect(calls).toHaveLength(4);
+    expect(calls.map(({ init }) => init?.method)).toEqual([
+      "GET",
+      "POST",
+      "GET",
+      "POST",
+    ]);
+    expect(result).toEqual({
+      action: "update",
+      previousTitle: "Old title",
+      title: "New title",
+      canonicalUrl: "https://scrapbox.io/shiyui/New%20title",
+      previousCommitId: "commit-before",
+      commitId: "commit-after",
+      changed: true,
+      titleChanged: true,
+      bodyChanged: true,
+    });
+  });
+
+  it("treats an empty body as deletion of every body line", async () => {
+    const current = editablePage("Page", ["first", "second"]);
+    const { fetcher } = createWriteFixtureFetch(
+      { method: "GET", body: current },
+      {
+        method: "POST",
+        body: (call: FetchCall) => {
+          expect(requestBody(call).changes).toEqual([
+            { _delete: "body-0" },
+            { _delete: "body-1" },
+          ]);
+          return appliedPreviewFromRequest(call, current);
+        },
+      },
+      { method: "GET", body: current },
+      {
+        method: "POST",
+        body: { commitId: "commit-after", page: { title: "Page" } },
+      },
+    );
+
+    const result = await createCosenseClient(
+      TEST_PERSONAL_ACCESS_TOKEN,
+      fetcher,
+    ).updatePage({
+      title: "Page",
+      expectedCommitId: "commit-before",
+      body: "",
+    });
+
+    expect(result).toMatchObject({
+      action: "update",
+      changed: true,
+      titleChanged: false,
+      bodyChanged: true,
+    });
+  });
+
+  it("returns an unchanged result after only the preflight GET", async () => {
+    const current = editablePage("Page", [" exact ", "body"]);
+    const { fetcher, calls } = createWriteFixtureFetch({
+      method: "GET",
+      body: current,
+    });
+
+    const result = await createCosenseClient(
+      TEST_PERSONAL_ACCESS_TOKEN,
+      fetcher,
+    ).updatePage({
+      title: "Page",
+      expectedCommitId: "commit-before",
+      newTitle: " Page ",
+      body: " exact \nbody",
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(result).toEqual({
+      action: "update",
+      previousTitle: "Page",
+      title: "Page",
+      canonicalUrl: "https://scrapbox.io/shiyui/Page",
+      previousCommitId: "commit-before",
+      commitId: "commit-before",
+      changed: false,
+      titleChanged: false,
+      bodyChanged: false,
+    });
+  });
+
+  it("rejects a stale expected commit before preview", async () => {
+    const { fetcher, calls } = createWriteFixtureFetch({
+      method: "GET",
+      body: editablePage("Page", ["body"], "newer-commit"),
+    });
+
+    await expect(
+      createCosenseClient(TEST_PERSONAL_ACCESS_TOKEN, fetcher).updatePage({
+        title: "Page",
+        expectedCommitId: "commit-before",
+        body: "new body",
+      }),
+    ).rejects.toMatchObject({
+      name: "CosenseWriteConflictError",
+      reason: "stale-commit",
+    });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("rejects an inexact preview without rechecking or submitting", async () => {
+    const current = editablePage("Page", ["old"]);
+    const { fetcher, calls } = createWriteFixtureFetch(
+      { method: "GET", body: current },
+      {
+        method: "POST",
+        body: {
+          previewId: "preview-id",
+          expireAt: "soon",
+          pagePreview: {
+            title: "Page",
+            persistent: true,
+            lines: [
+              { id: "title-line", text: "Page" },
+              { id: "body-0", text: "old" },
+            ],
+          },
+        },
+      },
+    );
+
+    await expect(
+      createCosenseClient(TEST_PERSONAL_ACCESS_TOKEN, fetcher).updatePage({
+        title: "Page",
+        expectedCommitId: "commit-before",
+        body: "new",
+      }),
+    ).rejects.toMatchObject({
+      name: "CosenseResponseError",
+      operation: "page edit preview",
+    });
+    expect(calls).toHaveLength(2);
+  });
+
+  it("maps an auto-suffixed rename preview to duplicate-title", async () => {
+    const current = editablePage("Page", ["body"]);
+    const { fetcher, calls } = createWriteFixtureFetch(
+      { method: "GET", body: current },
+      {
+        method: "POST",
+        body: (call: FetchCall) => {
+          const preview = appliedPreviewFromRequest(call, current) as {
+            pagePreview: { title: string };
+          };
+          preview.pagePreview.title = "Taken (2)";
+          return preview;
+        },
+      },
+    );
+
+    await expect(
+      createCosenseClient(TEST_PERSONAL_ACCESS_TOKEN, fetcher).updatePage({
+        title: "Page",
+        expectedCommitId: "commit-before",
+        newTitle: "Taken",
+      }),
+    ).rejects.toMatchObject({
+      name: "CosenseWriteConflictError",
+      reason: "duplicate-title",
+    });
+    expect(calls).toHaveLength(2);
+  });
+
+  it("does not submit when the commit changes after preview", async () => {
+    const current = editablePage("Page", ["old"]);
+    const { fetcher, calls } = createWriteFixtureFetch(
+      { method: "GET", body: current },
+      {
+        method: "POST",
+        body: (call: FetchCall) => appliedPreviewFromRequest(call, current),
+      },
+      {
+        method: "GET",
+        body: editablePage("Page", ["old"], "newer-commit"),
+      },
+    );
+
+    await expect(
+      createCosenseClient(TEST_PERSONAL_ACCESS_TOKEN, fetcher).updatePage({
+        title: "Page",
+        expectedCommitId: "commit-before",
+        body: "new",
+      }),
+    ).rejects.toMatchObject({
+      name: "CosenseWriteConflictError",
+      reason: "stale-commit",
+    });
+    expect(calls).toHaveLength(3);
+  });
+
+  it("uses the unknown-outcome error for a submit network failure", async () => {
+    const current = editablePage("Page", ["old"]);
+    const { fetcher, calls } = createWriteFixtureFetch(
+      { method: "GET", body: current },
+      {
+        method: "POST",
+        body: (call: FetchCall) => appliedPreviewFromRequest(call, current),
+      },
+      { method: "GET", body: current },
+      { method: "POST", error: new TypeError("network failed") },
+    );
+
+    await expect(
+      createCosenseClient(TEST_PERSONAL_ACCESS_TOKEN, fetcher).updatePage({
+        title: "Page",
+        expectedCommitId: "commit-before",
+        body: "new",
+      }),
+    ).rejects.toBeInstanceOf(CosenseWriteOutcomeUnknownError);
+    expect(calls).toHaveLength(4);
+  });
+
+  it("rejects invalid input and updates requiring over 100 changes", async () => {
+    const fetcher: typeof fetch = vi.fn();
+    const client = createCosenseClient(TEST_PERSONAL_ACCESS_TOKEN, fetcher);
+
+    await expect(
+      client.updatePage({ title: "Page", expectedCommitId: "commit-before" }),
+    ).rejects.toThrow("At least one of body or newTitle is required");
+    await expect(
+      client.updatePage({
+        title: "Page",
+        expectedCommitId: "commit-before",
+        body: "x\n".repeat(100),
+      }),
+    ).rejects.toThrow();
+    await expect(
+      client.updatePage({
+        title: "Page",
+        expectedCommitId: "commit-before",
+        body: "a\0b",
+      }),
+    ).rejects.toThrow("Must not contain NUL");
+    expect(fetcher).not.toHaveBeenCalled();
+
+    const tooMany = editablePage(
+      "Page",
+      Array.from({ length: 101 }, (_, index) => `line-${index}`),
+    );
+    const bounded = createWriteFixtureFetch({ method: "GET", body: tooMany });
+    await expect(
+      createCosenseClient(
+        TEST_PERSONAL_ACCESS_TOKEN,
+        bounded.fetcher,
+      ).updatePage({
+        title: "Page",
+        expectedCommitId: "commit-before",
+        body: "",
+      }),
+    ).rejects.toThrow("must not require more than 100 changes");
+    expect(bounded.calls).toHaveLength(1);
+  });
+});
+
+describe("replaceLinks", () => {
+  it("uses one fixed-origin PAT POST and trims both titles", async () => {
+    const { fetcher, calls } = createWriteFixtureFetch({
+      method: "POST",
+      body: (call: FetchCall) => {
+        expect(requestBody(call)).toEqual({
+          from: "old title",
+          to: "new title",
+        });
+        return { message: "replacement started" };
+      },
+    });
+
+    const result = await createCosenseClient(
+      TEST_PERSONAL_ACCESS_TOKEN,
+      fetcher,
+    ).replaceLinks({ fromTitle: " old title ", toTitle: " new title " });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe(
+      "https://scrapbox.io/api/pages/shiyui/replace/links",
+    );
+    expectAuthenticatedJsonPost(calls[0] as FetchCall);
+    expect(result).toEqual({
+      action: "replace-links",
+      fromTitle: "old title",
+      toTitle: "new title",
+      message: "replacement started",
+    });
+  });
+
+  it("rejects invalid or normalized-equal titles before fetching", async () => {
+    const fetcher: typeof fetch = vi.fn();
+    const client = createCosenseClient(TEST_PERSONAL_ACCESS_TOKEN, fetcher);
+
+    await expect(
+      client.replaceLinks({ fromTitle: "Same Page", toTitle: "same_page" }),
+    ).rejects.toThrow("must refer to different titles");
+    await expect(
+      client.replaceLinks({ fromTitle: "old\ntitle", toTitle: "new" }),
+    ).rejects.toThrow();
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("preserves authentication failures as safe non-retryable errors", async () => {
+    const { fetcher } = createWriteFixtureFetch({
+      method: "POST",
+      status: 401,
+      body: { secret: TEST_PERSONAL_ACCESS_TOKEN },
+    });
+
+    await expect(
+      createCosenseClient(TEST_PERSONAL_ACCESS_TOKEN, fetcher).replaceLinks({
+        fromTitle: "old",
+        toTitle: "new",
+      }),
+    ).rejects.toMatchObject({
+      name: "CosenseAuthenticationError",
+      status: 401,
+      operation: "replace links",
+    });
+  });
+
+  it.each([301, 302])("does not follow HTTP %i redirects", async (status) => {
+    const location = "https://example.invalid/replaced";
+    const response = new Response("redirect details", {
+      status,
+      headers: { Location: location },
+    });
+    const jsonSpy = vi.spyOn(response, "json");
+    const textSpy = vi.spyOn(response, "text");
+    const calls: FetchCall[] = [];
+    const fetcher: typeof fetch = async (input, init) => {
+      const call = { url: String(input), init };
+      calls.push(call);
+      expectAuthenticatedJsonPost(call);
+      return response;
+    };
+
+    const error = await createCosenseClient(TEST_PERSONAL_ACCESS_TOKEN, fetcher)
+      .replaceLinks({ fromTitle: "old", toTitle: "new" })
+      .then(
+        () => undefined,
+        (reason: unknown) => reason,
+      );
+
+    expect(error).toMatchObject({
+      name: "CosenseUpstreamError",
+      status,
+      operation: "replace links",
+    });
+    expect(String(error)).not.toContain(location);
+    expect(calls).toHaveLength(1);
+    expect(jsonSpy).not.toHaveBeenCalled();
+    expect(textSpy).not.toHaveBeenCalled();
+    expect(response.bodyUsed).toBe(false);
+  });
+
+  it.each([
+    ["network failure", { error: new TypeError("network failed") }],
+    ["server failure", { status: 503, body: { secret: "not exposed" } }],
+    ["invalid success", { body: { message: "x".repeat(501) } }],
+  ])("marks %s as retryable without retrying", async (_name, fixture) => {
+    const { fetcher, calls } = createWriteFixtureFetch({
+      method: "POST",
+      ...fixture,
+    });
+
+    await expect(
+      createCosenseClient(TEST_PERSONAL_ACCESS_TOKEN, fetcher).replaceLinks({
+        fromTitle: "old",
+        toTitle: "new",
+      }),
+    ).rejects.toBeInstanceOf(CosenseReplaceLinksRetryableError);
+    expect(calls).toHaveLength(1);
+  });
+
+  it.each([400, 429])(
+    "preserves HTTP %i as a non-retryable upstream error",
+    async (status) => {
+      const { fetcher, calls } = createWriteFixtureFetch({
+        method: "POST",
+        status,
+        body: { error: "request rejected" },
+      });
+
+      await expect(
+        createCosenseClient(TEST_PERSONAL_ACCESS_TOKEN, fetcher).replaceLinks({
+          fromTitle: "old",
+          toTitle: "new",
+        }),
+      ).rejects.toMatchObject({
+        name: "CosenseUpstreamError",
+        status,
+        operation: "replace links",
+      });
+      expect(calls).toHaveLength(1);
+    },
+  );
+});
+
+describe("write errors and limits", () => {
+  it.each([401, 403])(
+    "returns a safe write authentication error for HTTP %i without reading the body",
+    async (status) => {
+      const response = new Response(
+        `upstream details: ${TEST_PERSONAL_ACCESS_TOKEN}`,
+        { status },
+      );
+      const jsonSpy = vi.spyOn(response, "json");
+      const textSpy = vi.spyOn(response, "text");
+      const calls: FetchCall[] = [];
+      const fetcher: typeof fetch = async (input, init) => {
+        const call = { url: String(input), init };
+        calls.push(call);
+        if (calls.length === 1) {
+          expectAuthenticatedJsonGet(call);
+          return Response.json(missingPage("山形"));
+        }
+        expectAuthenticatedJsonPost(call);
+        return response;
+      };
+
+      const error = await createCosenseClient(
+        TEST_PERSONAL_ACCESS_TOKEN,
+        fetcher,
+      )
+        .createPage({ title: "山形", text: "本文" })
+        .then(
+          () => undefined,
+          (reason: unknown) => reason,
+        );
+
+      expect(error).toMatchObject({
+        name: "CosenseAuthenticationError",
+        status,
+        operation: "page edit preview",
+        message: "Cosense authentication failed.",
+      });
+      expect(String(error)).not.toContain(TEST_PERSONAL_ACCESS_TOKEN);
+      expect(calls).toHaveLength(2);
+      expect(jsonSpy).not.toHaveBeenCalled();
+      expect(textSpy).not.toHaveBeenCalled();
+      expect(response.bodyUsed).toBe(false);
+    },
+  );
+
+  it("maps known preview and submit 409 responses to safe typed conflicts", async () => {
+    const upstreamSecret = `latest contains ${TEST_PERSONAL_ACCESS_TOKEN}`;
+    const previewFailure = createWriteFixtureFetch(
+      { method: "GET", body: missingPage("山形") },
+      {
+        method: "POST",
+        status: 409,
+        body: { error: "NotFastForward", latest: upstreamSecret },
+      },
+    );
+    const previewError = await createCosenseClient(
+      TEST_PERSONAL_ACCESS_TOKEN,
+      previewFailure.fetcher,
+    )
+      .createPage({ title: "山形", text: "本文" })
+      .then(
+        () => undefined,
+        (reason: unknown) => reason,
+      );
+    expect(previewError).toMatchObject({
+      name: "CosenseWriteConflictError",
+      reason: "not-fast-forward",
+      status: 409,
+    });
+
+    const submitFailure = createWriteFixtureFetch(
+      { method: "GET", body: missingPage("山形") },
+      {
+        method: "POST",
+        body: (call: FetchCall) =>
+          previewFromRequest(call, { title: "山形", persistent: false }),
+      },
+      { method: "GET", body: missingPage("山形") },
+      { method: "POST", status: 409, body: { error: "DuplicateTitle" } },
+    );
+    const submitError = await createCosenseClient(
+      TEST_PERSONAL_ACCESS_TOKEN,
+      submitFailure.fetcher,
+    )
+      .createPage({ title: "山形", text: "本文" })
+      .then(
+        () => undefined,
+        (reason: unknown) => reason,
+      );
+    expect(submitError).toMatchObject({
+      name: "CosenseWriteConflictError",
+      reason: "duplicate-title",
+      status: 409,
+    });
+    expect(JSON.stringify([previewError, submitError])).not.toContain(
+      upstreamSecret,
+    );
+  });
+
+  it("keeps a consumed or expired submit preview as an ordinary 404", async () => {
+    const { fetcher, calls } = createWriteFixtureFetch(
+      { method: "GET", body: missingPage("山形") },
+      {
+        method: "POST",
+        body: (call: FetchCall) =>
+          previewFromRequest(call, { title: "山形", persistent: false }),
+      },
+      { method: "GET", body: missingPage("山形") },
+      { method: "POST", status: 404, body: { error: "Expired" } },
+    );
+
+    await expect(
+      createCosenseClient(TEST_PERSONAL_ACCESS_TOKEN, fetcher).createPage({
+        title: "山形",
+        text: "本文",
+      }),
+    ).rejects.toMatchObject({
+      name: "CosenseUpstreamError",
+      status: 404,
+      operation: "page edit submit",
+    });
+    expect(calls).toHaveLength(4);
+  });
+
+  it.each([
+    ["network failure", { error: new TypeError("network failed") }],
+    ["abort", { error: new DOMException("Aborted", "AbortError") }],
+    ["malformed 2xx", { body: { commitId: "missing-page" } }],
+    ["server failure", { status: 503, body: { secret: "do not expose" } }],
+  ])("treats submit %s as an unknown outcome", async (_name, submitFixture) => {
+    const { fetcher, calls } = createWriteFixtureFetch(
+      { method: "GET", body: missingPage("山形") },
+      {
+        method: "POST",
+        body: (call: FetchCall) =>
+          previewFromRequest(call, { title: "山形", persistent: false }),
+      },
+      { method: "GET", body: missingPage("山形") },
+      { method: "POST", ...submitFixture },
+    );
+
+    const error = await createCosenseClient(TEST_PERSONAL_ACCESS_TOKEN, fetcher)
+      .createPage({ title: "山形", text: "本文" })
+      .then(
+        () => undefined,
+        (reason: unknown) => reason,
+      );
+
+    expect(error).toBeInstanceOf(CosenseWriteOutcomeUnknownError);
+    expect(error).toMatchObject({ operation: "page edit submit" });
+    expect(String(error)).not.toContain("network failed");
+    expect(String(error)).not.toContain("do not expose");
+    expect(calls).toHaveLength(4);
+  });
+
+  it.each([301, 302])(
+    "does not follow a page-edit preview HTTP %i redirect",
+    async (status) => {
+      const location = "https://example.invalid/write";
+      const redirected = new Response("redirect details", {
+        status,
+        headers: { Location: location },
+      });
+      const jsonSpy = vi.spyOn(redirected, "json");
+      const textSpy = vi.spyOn(redirected, "text");
+      const calls: FetchCall[] = [];
+      const fetcher: typeof fetch = async (input, init) => {
+        const call = { url: String(input), init };
+        calls.push(call);
+        if (calls.length === 1) {
+          expectAuthenticatedJsonGet(call);
+          return Response.json(missingPage("山形"));
+        }
+        expectAuthenticatedJsonPost(call);
+        return redirected;
+      };
+
+      const error = await createCosenseClient(
+        TEST_PERSONAL_ACCESS_TOKEN,
+        fetcher,
+      )
+        .createPage({ title: "山形", text: "本文" })
+        .then(
+          () => undefined,
+          (reason: unknown) => reason,
+        );
+
+      expect(error).toMatchObject({
+        name: "CosenseUpstreamError",
+        status,
+        operation: "page edit preview",
+      });
+      expect(String(error)).not.toContain(location);
+      expect(calls).toHaveLength(2);
+      expect(jsonSpy).not.toHaveBeenCalled();
+      expect(textSpy).not.toHaveBeenCalled();
+      expect(redirected.bodyUsed).toBe(false);
+    },
+  );
+
+  it("rejects invalid write input without making a request", async () => {
+    const fetcher: typeof fetch = vi.fn();
+    const client = createCosenseClient(TEST_PERSONAL_ACCESS_TOKEN, fetcher);
+    const invalidCreateInputs = [
+      { title: "山形", text: " \n " },
+      { title: "山形", text: "a\0b" },
+      { title: "山形", text: "日".repeat(10_001) },
+      { title: "山形", text: "x\n".repeat(100) },
+      { title: "日".repeat(501), text: "本文" },
+      { title: "山\n形", text: "本文" },
+      { title: "山\r形", text: "本文" },
+      { title: "山\0形", text: "本文" },
+    ];
+
+    for (const input of invalidCreateInputs) {
+      await expect(client.createPage(input)).rejects.toThrow();
+    }
+    await expect(
+      client.appendToPage({
+        title: "山形",
+        text: "本文",
+        expectedCommitId: "c".repeat(501),
+      }),
+    ).rejects.toThrow();
+    expect(fetcher).not.toHaveBeenCalled();
   });
 });

@@ -132,6 +132,20 @@ function listPagesRequest(assertion: string): Request {
   });
 }
 
+function createPageRequest(assertion: string): Request {
+  return toolCallRequest(assertion, "create_page", {
+    title: "山形",
+    text: "行きたい場所",
+  });
+}
+
+function replaceLinksRequest(assertion: string): Request {
+  return toolCallRequest(assertion, "replace_links", {
+    fromTitle: "山形",
+    toTitle: "蔵王",
+  });
+}
+
 function mockJwksAndCosense(
   cosenseResponse: unknown = {
     persistent: true,
@@ -221,6 +235,10 @@ describe("Access-protected MCP Worker", () => {
       "get_related_pages",
       "list_pages",
       "get_page_changes",
+      "create_page",
+      "append_to_page",
+      "update_page",
+      "replace_links",
     ]);
   });
 
@@ -308,6 +326,177 @@ describe("Access-protected MCP Worker", () => {
     expect(headers.get("x-personal-access-token")).toBe(
       TEST_PERSONAL_ACCESS_TOKEN,
     );
+  });
+
+  it("creates a page with four fixed authenticated requests and no retry", async () => {
+    const cosenseCalls: Array<{
+      body: string | undefined;
+      cache: string | undefined;
+      headers: Headers;
+      method: string | undefined;
+      redirect: string | undefined;
+      url: string;
+    }> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === `${TEAM_DOMAIN}/cdn-cgi/access/certs`) {
+        return Response.json(jwks);
+      }
+      if (!url.startsWith("https://scrapbox.io/")) {
+        throw new Error(`Unexpected fetch: ${url}`);
+      }
+
+      cosenseCalls.push({
+        url,
+        method: init?.method,
+        body: typeof init?.body === "string" ? init.body : undefined,
+        cache: init?.cache,
+        redirect: init?.redirect,
+        headers: new Headers(init?.headers),
+      });
+
+      if (url.endsWith("/page-edit-for-ai/preview")) {
+        const body = JSON.parse(String(init?.body)) as {
+          changes: Array<{ lines: { id: string; text: string } }>;
+        };
+        return Response.json({
+          previewId: "preview-id",
+          expireAt: "2026-08-14T08:05:00.000Z",
+          pagePreview: {
+            persistent: false,
+            title: "山形",
+            lines: body.changes.map(({ lines }) => lines),
+          },
+        });
+      }
+      if (url.endsWith("/page-edit-for-ai/submit")) {
+        return Response.json({
+          commitId: "created-commit-id",
+          page: { title: "山形" },
+        });
+      }
+      return Response.json({ persistent: false, title: "山形" });
+    });
+
+    const response = await workerBinding.fetch(
+      createPageRequest(await createAssertion()),
+    );
+    const body = (await response.json()) as {
+      result?: { structuredContent?: Record<string, unknown> };
+    };
+
+    expect(response.status).toBe(200);
+    expectNoStore(response);
+    expect(body.result?.structuredContent).toMatchObject({
+      action: "create",
+      title: "山形",
+      commitId: "created-commit-id",
+      addedLines: 2,
+    });
+    expect(cosenseCalls.map(({ url, method }) => [method, url])).toEqual([
+      ["GET", "https://scrapbox.io/api/pages/v2/shiyui/%E5%B1%B1%E5%BD%A2"],
+      [
+        "POST",
+        "https://scrapbox.io/api/pages/v2/shiyui/page-edit-for-ai/preview",
+      ],
+      ["GET", "https://scrapbox.io/api/pages/v2/shiyui/%E5%B1%B1%E5%BD%A2"],
+      [
+        "POST",
+        "https://scrapbox.io/api/pages/v2/shiyui/page-edit-for-ai/submit",
+      ],
+    ]);
+    expect(JSON.parse(cosenseCalls[1]?.body as string)).toMatchObject({
+      changes: [
+        { _insert: "_end", lines: { text: "山形" } },
+        { _insert: "_end", lines: { text: "行きたい場所" } },
+      ],
+    });
+    expect(JSON.parse(cosenseCalls[3]?.body as string)).toEqual({
+      previewId: "preview-id",
+    });
+    for (const call of cosenseCalls) {
+      expect(call.cache).toBe("no-store");
+      expect(call.redirect).toBe("manual");
+      expect(call.headers.get("accept")).toBe("application/json");
+      expect(call.headers.get("x-personal-access-token")).toBe(
+        TEST_PERSONAL_ACCESS_TOKEN,
+      );
+      expect(call.headers.has("authorization")).toBe(false);
+      expect(call.headers.has("cookie")).toBe(false);
+      expect(call.headers.has("x-service-account-access-key")).toBe(false);
+    }
+    expect(cosenseCalls[1]?.headers.get("content-type")).toBe(
+      "application/json",
+    );
+    expect(cosenseCalls[3]?.headers.get("content-type")).toBe(
+      "application/json",
+    );
+  });
+
+  it("replaces links with one fixed authenticated POST and no preview", async () => {
+    const cosenseCalls: Array<{
+      body: string | undefined;
+      cache: string | undefined;
+      headers: Headers;
+      method: string | undefined;
+      redirect: string | undefined;
+      url: string;
+    }> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === `${TEAM_DOMAIN}/cdn-cgi/access/certs`) {
+        return Response.json(jwks);
+      }
+      if (!url.startsWith("https://scrapbox.io/")) {
+        throw new Error(`Unexpected fetch: ${url}`);
+      }
+
+      cosenseCalls.push({
+        url,
+        method: init?.method,
+        body: typeof init?.body === "string" ? init.body : undefined,
+        cache: init?.cache,
+        redirect: init?.redirect,
+        headers: new Headers(init?.headers),
+      });
+      return Response.json({ message: "Links replaced." });
+    });
+
+    const response = await workerBinding.fetch(
+      replaceLinksRequest(await createAssertion()),
+    );
+    const body = (await response.json()) as {
+      result?: { structuredContent?: Record<string, unknown> };
+    };
+
+    expect(response.status).toBe(200);
+    expectNoStore(response);
+    expect(body.result?.structuredContent).toEqual({
+      action: "replace-links",
+      fromTitle: "山形",
+      toTitle: "蔵王",
+      message: "Links replaced.",
+    });
+    expect(cosenseCalls).toHaveLength(1);
+    expect(cosenseCalls[0]).toMatchObject({
+      url: "https://scrapbox.io/api/pages/shiyui/replace/links",
+      method: "POST",
+      cache: "no-store",
+      redirect: "manual",
+    });
+    expect(JSON.parse(cosenseCalls[0]?.body as string)).toEqual({
+      from: "山形",
+      to: "蔵王",
+    });
+    const headers = cosenseCalls[0]?.headers as Headers;
+    expect(headers.get("accept")).toBe("application/json");
+    expect(headers.get("content-type")).toBe("application/json");
+    expect(headers.get("x-personal-access-token")).toBe(
+      TEST_PERSONAL_ACCESS_TOKEN,
+    );
+    expect(headers.has("authorization")).toBe(false);
+    expect(headers.has("cookie")).toBe(false);
+    expect(headers.has("x-service-account-access-key")).toBe(false);
   });
 
   it.each([

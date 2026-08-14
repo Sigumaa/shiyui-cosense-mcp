@@ -7,16 +7,33 @@ import { z } from "zod";
 
 import {
   CosenseAuthenticationError,
+  CosenseReplaceLinksRetryableError,
   CosenseResponseError,
   CosenseUpstreamError,
+  CosenseWriteConflictError,
+  CosenseWriteOutcomeUnknownError,
   type CosenseClient,
 } from "./cosense";
 
-const annotations = {
+const readAnnotations = {
   readOnlyHint: true,
   openWorldHint: true,
 } as const;
+const writeAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: false,
+  openWorldHint: true,
+} as const;
+const destructiveWriteAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: true,
+  openWorldHint: true,
+} as const;
 const MAX_INPUT_LENGTH = 500;
+const MAX_WRITE_TEXT_LENGTH = 10_000;
+const MAX_WRITE_LINES = 100;
 
 const titleSchema = z
   .string()
@@ -26,6 +43,10 @@ const titleSchema = z
   .refine((title) => title !== "." && title !== "..", {
     message: "Dot-segment titles are not supported",
   });
+const writeTitleSchema = titleSchema.refine(
+  (title) => !/[\r\n\u0000]/.test(title),
+  { message: "Write titles must not contain CR, LF, or NUL" },
+);
 const querySchema = z.string().trim().min(1).max(MAX_INPUT_LENGTH);
 const limitSchema = z.number().int().min(1).max(20).default(10);
 const matchSchema = z.enum(["and", "or"]).default("and");
@@ -38,6 +59,52 @@ const pageIdSchema = z
     message: "Dot-segment page IDs are not supported",
   });
 const commitIdSchema = z.string().trim().min(1).max(MAX_INPUT_LENGTH);
+const writeTextSchema = z
+  .string()
+  .max(MAX_WRITE_TEXT_LENGTH)
+  .refine((text) => text.trim().length > 0, {
+    message: "Text must not be blank",
+  })
+  .refine((text) => !text.includes("\u0000"), {
+    message: "Text must not contain NUL",
+  })
+  .refine((text) => text.split(/\r?\n/).length <= MAX_WRITE_LINES, {
+    message: `Text must contain at most ${MAX_WRITE_LINES} lines`,
+  });
+const updateBodySchema = z
+  .string()
+  .max(MAX_WRITE_TEXT_LENGTH)
+  .refine((body) => !body.includes("\u0000"), {
+    message: "Body must not contain NUL",
+  })
+  .refine((body) => body.split(/\r?\n/).length <= MAX_WRITE_LINES, {
+    message: `Body must contain at most ${MAX_WRITE_LINES} lines`,
+  });
+const updatePageInputSchema = z
+  .object({
+    title: writeTitleSchema,
+    expectedCommitId: commitIdSchema,
+    body: updateBodySchema.optional(),
+    newTitle: writeTitleSchema.optional(),
+  })
+  .strict()
+  .refine(
+    ({ body, newTitle }) => body !== undefined || newTitle !== undefined,
+    { message: "Provide body, newTitle, or both" },
+  );
+const normalizedTitle = (title: string): string =>
+  title.toLowerCase().replaceAll(" ", "_");
+const replaceLinksInputSchema = z
+  .object({
+    fromTitle: writeTitleSchema,
+    toTitle: writeTitleSchema,
+  })
+  .strict()
+  .refine(
+    ({ fromTitle, toTitle }) =>
+      normalizedTitle(fromTitle) !== normalizedTitle(toTitle),
+    { message: "Source and destination titles must be different" },
+  );
 
 const getPageOutputSchema = z.object({
   exists: z.boolean(),
@@ -152,6 +219,34 @@ const pageChangesOutputSchema = z.object({
   ),
 });
 
+const writePageOutputSchema = z.object({
+  action: z.enum(["create", "append"]),
+  title: z.string(),
+  canonicalUrl: z.string(),
+  commitId: z.string(),
+  previousCommitId: z.string().optional(),
+  addedLines: z.number().int().positive(),
+});
+
+const updatePageOutputSchema = z.object({
+  action: z.literal("update"),
+  previousTitle: z.string(),
+  title: z.string(),
+  canonicalUrl: z.string(),
+  previousCommitId: z.string(),
+  commitId: z.string(),
+  changed: z.boolean(),
+  titleChanged: z.boolean(),
+  bodyChanged: z.boolean(),
+});
+
+const replaceLinksOutputSchema = z.object({
+  action: z.literal("replace-links"),
+  fromTitle: z.string(),
+  toTitle: z.string(),
+  message: z.string(),
+});
+
 function success(value: object, summary: string): CallToolResult {
   return {
     content: [{ type: "text", text: summary }],
@@ -163,10 +258,47 @@ function failure(error: unknown): CallToolResult {
   let message = "Cosense request failed.";
   if (error instanceof CosenseAuthenticationError) {
     message = "Cosense authentication failed.";
+  } else if (error instanceof CosenseWriteConflictError) {
+    switch (error.reason) {
+      case "page-already-exists":
+        message =
+          "A Cosense page with this title already exists. Read it before deciding whether to append.";
+        break;
+      case "page-missing":
+      case "page-renamed":
+      case "page-replaced":
+        message =
+          "The target Cosense page is no longer the page that was approved. Read it again before writing.";
+        break;
+      case "duplicate-title":
+        message =
+          "A Cosense page with this title was created concurrently. Read it and ask whether to append or use another title.";
+        break;
+      case "stale-commit":
+      case "not-fast-forward":
+        message =
+          "The Cosense page state changed after it was read. Read the current page and confirm the write again.";
+        break;
+    }
+  } else if (error instanceof CosenseWriteOutcomeUnknownError) {
+    message =
+      "Cosense may have committed the write, but the result could not be confirmed. Do not retry; call get_page first.";
+  } else if (error instanceof CosenseReplaceLinksRetryableError) {
+    message =
+      "The Cosense link replacement result could not be confirmed. Do not retry automatically; after user confirmation, the exact same replace_links arguments are safe to retry.";
   } else if (error instanceof CosenseResponseError) {
     message = "Cosense returned an unexpected response.";
   } else if (error instanceof CosenseUpstreamError) {
-    if (error.status === 429) {
+    if (error.operation === "page edit submit" && error.status === 404) {
+      message =
+        "The Cosense write preview is unavailable or already consumed. Do not retry; call get_page first.";
+    } else if (
+      error.operation === "page edit preview" &&
+      error.status === 422
+    ) {
+      message =
+        "Cosense rejected the proposed page content. Review the title and text before trying again.";
+    } else if (error.status === 429) {
       message = "Cosense is temporarily rate-limited. Try again later.";
     } else if (error.status >= 500) {
       message = "Cosense is temporarily unavailable.";
@@ -186,7 +318,7 @@ export function createCosenseMcpServer(
   client: CosenseClient,
 ): McpServer {
   const server = new McpServer(
-    { name: "shiyui-cosense-mcp", version: "0.1.0" },
+    { name: "shiyui-cosense-mcp", version: "0.2.0" },
     {
       cacheHints: {
         "server/discover": { ttlMs: 0, cacheScope: "private" },
@@ -203,7 +335,7 @@ export function createCosenseMcpServer(
         "Read one page from the fixed Cosense project. Returns the page body without author data or line IDs.",
       inputSchema: z.object({ title: titleSchema }),
       outputSchema: getPageOutputSchema,
-      annotations,
+      annotations: readAnnotations,
     },
     async ({ title }, context) => {
       try {
@@ -233,7 +365,7 @@ export function createCosenseMcpServer(
         limit: limitSchema,
       }),
       outputSchema: fullTextSearchOutputSchema,
-      annotations,
+      annotations: readAnnotations,
     },
     async (input, context) => {
       try {
@@ -256,7 +388,7 @@ export function createCosenseMcpServer(
         limit: limitSchema,
       }),
       outputSchema: vectorSearchOutputSchema,
-      annotations,
+      annotations: readAnnotations,
     },
     async (input, context) => {
       try {
@@ -283,7 +415,7 @@ export function createCosenseMcpServer(
         cursor: z.string().min(1).max(MAX_INPUT_LENGTH).optional(),
       }),
       outputSchema: relatedPagesOutputSchema,
-      annotations,
+      annotations: readAnnotations,
     },
     async (input, context) => {
       try {
@@ -324,7 +456,7 @@ export function createCosenseMcpServer(
           .default(0),
       }),
       outputSchema: listPagesOutputSchema,
-      annotations,
+      annotations: readAnnotations,
     },
     async (input, context) => {
       try {
@@ -347,7 +479,7 @@ export function createCosenseMcpServer(
         commitId: commitIdSchema.optional(),
       }),
       outputSchema: pageChangesOutputSchema,
-      annotations,
+      annotations: readAnnotations,
     },
     async (input, context) => {
       try {
@@ -363,6 +495,111 @@ export function createCosenseMcpServer(
         return success(
           value,
           `Found ${value.returned} changes across ${value.commitCount} commits.`,
+        );
+      } catch (error) {
+        return failure(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    "create_page",
+    {
+      title: "Create Cosense page",
+      description:
+        "Create one page in the fixed Cosense project. Call only after the user has approved the exact title and text. Fails if the page already exists and never falls back to append or overwrite. The client checks absence, previews the exact page, and submits once without retrying. If the outcome is uncertain, call get_page before any further write.",
+      inputSchema: z
+        .object({
+          title: writeTitleSchema,
+          text: writeTextSchema,
+        })
+        .strict(),
+      outputSchema: writePageOutputSchema,
+      annotations: writeAnnotations,
+    },
+    async (input, context) => {
+      try {
+        const value = await client.createPage(input, context.mcpReq.signal);
+        return success(
+          value,
+          `Created “${value.title}” with ${value.addedLines} total lines.`,
+        );
+      } catch (error) {
+        return failure(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    "append_to_page",
+    {
+      title: "Append to Cosense page",
+      description:
+        "Append exact text to the end of one existing page in the fixed Cosense project. First call get_page, then pass its current commitId as expectedCommitId, and call only after the user has approved the exact title and text. Fails if the page is missing, renamed, or changed; it never creates, replaces, or deletes content. The client previews and submits once without retrying. If the outcome is uncertain, call get_page before any further write.",
+      inputSchema: z
+        .object({
+          title: writeTitleSchema,
+          text: writeTextSchema,
+          expectedCommitId: commitIdSchema,
+        })
+        .strict(),
+      outputSchema: writePageOutputSchema,
+      annotations: writeAnnotations,
+    },
+    async (input, context) => {
+      try {
+        const value = await client.appendToPage(input, context.mcpReq.signal);
+        return success(
+          value,
+          `Appended ${value.addedLines} lines to “${value.title}”.`,
+        );
+      } catch (error) {
+        return failure(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    "update_page",
+    {
+      title: "Update Cosense page",
+      description:
+        "Update one existing page in the fixed Cosense project, including replacing its body, changing its title, or both. First call get_page and pass its current commitId as expectedCommitId. body is the complete final page body excluding the title: omit it to keep the body, or pass an empty string to delete the body. Call only after the user has approved the exact supplied final body and/or new title. The client previews and submits once without retrying. After a title change, ask separately before calling replace_links; update_page does not rewrite links.",
+      inputSchema: updatePageInputSchema,
+      outputSchema: updatePageOutputSchema,
+      annotations: destructiveWriteAnnotations,
+    },
+    async (input, context) => {
+      try {
+        const value = await client.updatePage(input, context.mcpReq.signal);
+        const summary = !value.changed
+          ? `No changes were needed for “${value.title}”.`
+          : value.titleChanged
+            ? `Updated “${value.previousTitle}” and renamed it to “${value.title}”.`
+            : `Updated “${value.title}”.`;
+        return success(value, summary);
+      } catch (error) {
+        return failure(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    "replace_links",
+    {
+      title: "Replace Cosense links",
+      description:
+        "Replace links project-wide in the fixed Cosense project from one exact title to another. This directly replaces [title], #title, and [title.icon] references without preview and does not rename any page. Use get_page to inspect relevant pages when needed, and call only after the user has approved the exact fromTitle and toTitle. Do not call automatically after update_page; ask separately after a rename.",
+      inputSchema: replaceLinksInputSchema,
+      outputSchema: replaceLinksOutputSchema,
+      annotations: destructiveWriteAnnotations,
+    },
+    async (input, context) => {
+      try {
+        const value = await client.replaceLinks(input, context.mcpReq.signal);
+        return success(
+          value,
+          `Replaced project links from “${value.fromTitle}” to “${value.toTitle}”.`,
         );
       } catch (error) {
         return failure(error);
