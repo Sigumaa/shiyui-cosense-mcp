@@ -200,6 +200,9 @@ describe("createCosenseMcpServer", () => {
     expect(
       result.tools.find(({ name }) => name === "get_page_changes")?.description,
     ).toContain("do not call for routine page reads");
+    expect(
+      result.tools.find(({ name }) => name === "update_page")?.description,
+    ).toContain("every existing body line omitted from it is deleted");
 
     const expectedProperties = {
       get_page: ["title"],

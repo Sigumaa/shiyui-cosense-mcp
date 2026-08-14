@@ -37,7 +37,7 @@ write toolは、対象と正確な変更内容についてユーザーが書き�
 
 - `create_page` は同名の実pageがある場合に失敗する。既存pageへの追記へ切り替えない
 - `append_to_page` は直前の `get_page` が返した `commitId` を `expectedCommitId` として必須にする
-- `update_page` は直前の `get_page` が返した `commitId` を必須にし、title行を除く完成後の本文を `body` に指定する。`body` の省略は本文維持、空文字は本文全削除を表し、任意の `newTitle` でタイトルも変更できる
+- `update_page` は直前の `get_page` が返した `commitId` を必須にし、title行を除く完成後の本文を `body` に指定する。`body` の省略は本文維持、空文字は本文全削除を表す。`body` を指定した場合、含めなかった既存行は削除される。任意の `newTitle` でタイトルも変更できる
 - `replace_links` はproject内の `[title]`、`#title`、`[title.icon]` を一括置換する。pageタイトルは変更せず、previewも行わないため、影響範囲を別に承認してから呼ぶ
 - page編集はpageが不存在、rename済み、または更新済みなら失敗する。最新pageを読み直し、内容を再確認してから実行する
 - create / appendのtextとupdateのbodyは最大10,000文字・100行。NULを拒否し、create / appendでは空白だけのtextも拒否する

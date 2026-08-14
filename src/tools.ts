@@ -564,7 +564,7 @@ export function createCosenseMcpServer(
     {
       title: "Update Cosense page",
       description:
-        "Update one existing page in the fixed Cosense project, including replacing its body, changing its title, or both. First call get_page and pass its current commitId as expectedCommitId. body is the complete final page body excluding the title: omit it to keep the body, or pass an empty string to delete the body. Call only after the user has approved the exact supplied final body and/or new title. The client previews and submits once without retrying. After a title change, ask separately before calling replace_links; update_page does not rewrite links.",
+        "Update one existing page in the fixed Cosense project, including replacing its body, changing its title, or both. First call get_page and pass its current commitId as expectedCommitId. body is the complete final page body excluding the title: omit it to keep the body, or pass an empty string to delete the body. When body is provided, every existing body line omitted from it is deleted. Call only after the user has approved the exact supplied final body and/or new title. The client previews and submits once without retrying. After a title change, ask separately before calling replace_links; update_page does not rewrite links.",
       inputSchema: updatePageInputSchema,
       outputSchema: updatePageOutputSchema,
       annotations: destructiveWriteAnnotations,
