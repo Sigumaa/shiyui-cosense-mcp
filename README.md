@@ -35,7 +35,7 @@ project、origin、URL、HTTP header、credential、file pathはtool引数に含
 
 write toolは、対象と正確な変更内容についてユーザーが書き込みを承認した後だけ呼ぶ。
 
-MCP server-level instructionsで、書き込み案の作成前に既存pageまたは類似pageを確認し、project内のstyleを優先するようclientへ伝える。本文はMarkdownではなくCosense記法とし、行頭の半角spaceまたはtabで箇条書きと階層を作り、段落間に空行を置き、意図した内部linkを `[Page Title]` で記述する。操作固有の削除・競合・再実行条件は各tool descriptionに置く。
+project固有の書き方・記法・編集方針の正本はCosenseの [`cosenseの書き方`](https://scrapbox.io/shiyui/cosense%E3%81%AE%E6%9B%B8%E3%81%8D%E6%96%B9) とする。MCP descriptionには、pageの作成・追記・更新前に `get_page` で正本を読むことと、通常のreadでは不要であることだけを記載する。操作固有の削除・競合・再実行条件は各tool descriptionに置く。
 
 - `create_page` は同名の実pageがある場合に失敗する。既存pageへの追記へ切り替えない
 - `append_to_page` は直前の `get_page` が返した `commitId` を `expectedCommitId` として必須にする

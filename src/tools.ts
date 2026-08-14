@@ -31,12 +31,14 @@ const destructiveWriteAnnotations = {
   idempotentHint: true,
   openWorldHint: true,
 } as const;
-const serverInstructions = [
-  'This server accesses only the fixed Cosense project "shiyui".',
-  "Write raw Cosense syntax, not Markdown: use leading half-width spaces or tabs for list items, deeper indentation for child lines, blank lines between paragraphs, and [Page Title] for intentional internal links. Do not add Markdown list markers unless they are intended as literal text.",
-  "Before drafting an existing-page write, read the current page. For a new page, inspect a similar page when practical and match its wording, indentation, spacing, icons, and link style.",
-  "Before calling a write tool, obtain explicit user approval for the exact target and content change: title and text, final body and/or new title, or fromTitle and toTitle. Follow each tool description for operation-specific replacement and retry rules.",
-].join(" ");
+const serverDescription = [
+  'Cosense project "shiyui" を読み書きするMCP。',
+  "ページの作成・追記・更新を行う前には、get_page で「cosenseの書き方」を読み、",
+  "そこに記載されたプロジェクト固有の書き方・記法・編集方針に従う。",
+  "通常の読み取りだけの場合は読む必要はない。",
+].join("\n");
+const serverInstructions =
+  "Before calling a write tool, obtain explicit user approval for the exact target and content change: title and text, final body and/or new title, or fromTitle and toTitle. Follow each tool description for operation-specific replacement and retry rules.";
 const MAX_INPUT_LENGTH = 500;
 const MAX_WRITE_TEXT_LENGTH = 10_000;
 const MAX_WRITE_LINES = 100;
@@ -324,7 +326,11 @@ export function createCosenseMcpServer(
   client: CosenseClient,
 ): McpServer {
   const server = new McpServer(
-    { name: "shiyui-cosense-mcp", version: "0.2.0" },
+    {
+      name: "shiyui-cosense-mcp",
+      version: "0.2.0",
+      description: serverDescription,
+    },
     {
       instructions: serverInstructions,
       cacheHints: {

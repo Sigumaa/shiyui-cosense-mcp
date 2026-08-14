@@ -150,7 +150,7 @@ async function modernRequest(
 }
 
 describe("createCosenseMcpServer", () => {
-  it("publishes concise Cosense authoring conventions in server discovery", async () => {
+  it("publishes the project authoring guide path in server discovery", async () => {
     const response = await modernRequest(
       createHandler(createStubClient()),
       "server/discover",
@@ -158,6 +158,7 @@ describe("createCosenseMcpServer", () => {
     expect(response.error).toBeUndefined();
 
     const result = response.result as {
+      _meta: Record<string, unknown>;
       cacheScope: string;
       instructions: string;
       ttlMs: number;
@@ -167,13 +168,19 @@ describe("createCosenseMcpServer", () => {
       ttlMs: 0,
       cacheScope: "private",
     });
-    expect(result.instructions).toContain("raw Cosense syntax, not Markdown");
-    expect(result.instructions).toContain("leading half-width spaces or tabs");
-    expect(result.instructions).toContain(
-      "inspect a similar page when practical",
-    );
+    expect(result._meta["io.modelcontextprotocol/serverInfo"]).toMatchObject({
+      name: "shiyui-cosense-mcp",
+      version: "0.2.0",
+      description: [
+        'Cosense project "shiyui" を読み書きするMCP。',
+        "ページの作成・追記・更新を行う前には、get_page で「cosenseの書き方」を読み、",
+        "そこに記載されたプロジェクト固有の書き方・記法・編集方針に従う。",
+        "通常の読み取りだけの場合は読む必要はない。",
+      ].join("\n"),
+    });
     expect(result.instructions).toContain("explicit user approval");
-    expect(result.instructions.length).toBeLessThan(1_000);
+    expect(result.instructions).not.toContain("raw Cosense syntax");
+    expect(result.instructions.length).toBeLessThan(500);
   });
 
   it("publishes fixed-project read and write tools with private no-cache metadata", async () => {
