@@ -155,6 +155,21 @@ update / replace links:
 
 `confirmed: true` のような入力は人間の承認を証明しないため設けない。tool descriptionで対象と正確な変更内容の承認後だけ呼ぶよう指示し、ChatGPT側のwrite確認とCloudflare Accessを利用する。
 
+## Cosense記法とproject内の慣習
+
+公式CLIは単体commandだけでなく、編集前に対象pageを読み、project内の見出し・indent・空行・icon・linkのstyleへ合わせるAgent Skillも提供する。このMCPではSkill全体や編集手順を複製せず、会話中の書き込み案へ常に必要な規則だけをserver-level `instructions` でclientへ伝える。
+
+- 既存pageへの書き込み案は現在のpageを先に読む
+- 新規pageは必要に応じて類似pageを確認し、既存styleへ合わせる
+- MarkdownではなくCosense記法を使う
+- 箇条書きは行頭の半角spaceまたはtab、子要素はより深いindentで表す
+- 段落間は空行で分け、内部linkは意図がある場合に `[Page Title]` で表す
+
+`instructions` はclient向けの共通指示であり、強制的なvalidationではない。承認対象、本文全置換、project-wide link置換、retry条件は各tool descriptionとclient実装で別に担保する。
+
+- [公式CLI Agent Skill: edit-page](https://github.com/helpfeel/cosense-cli/blob/v1.11.0/skills/cosense/edit-page.md)
+- [Cosense Help: ブラケティング](https://scrapbox.io/help-jp/%E3%83%96%E3%83%A9%E3%82%B1%E3%83%86%E3%82%A3%E3%83%B3%E3%82%B0)
+
 ## 入力と通信境界
 
 - title: trim後1–500文字、`.` / `..`、CR / LF / NULを拒否

@@ -35,6 +35,8 @@ project、origin、URL、HTTP header、credential、file pathはtool引数に含
 
 write toolは、対象と正確な変更内容についてユーザーが書き込みを承認した後だけ呼ぶ。
 
+MCP server-level instructionsで、書き込み案の作成前に既存pageまたは類似pageを確認し、project内のstyleを優先するようclientへ伝える。本文はMarkdownではなくCosense記法とし、行頭の半角spaceまたはtabで箇条書きと階層を作り、段落間に空行を置き、意図した内部linkを `[Page Title]` で記述する。操作固有の削除・競合・再実行条件は各tool descriptionに置く。
+
 - `create_page` は同名の実pageがある場合に失敗する。既存pageへの追記へ切り替えない
 - `append_to_page` は直前の `get_page` が返した `commitId` を `expectedCommitId` として必須にする
 - `update_page` は直前の `get_page` が返した `commitId` を必須にし、title行を除く完成後の本文を `body` に指定する。`body` の省略は本文維持、空文字は本文全削除を表す。`body` を指定した場合、含めなかった既存行は削除される。任意の `newTitle` でタイトルも変更できる

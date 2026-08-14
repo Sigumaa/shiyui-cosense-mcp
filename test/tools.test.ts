@@ -150,6 +150,32 @@ async function modernRequest(
 }
 
 describe("createCosenseMcpServer", () => {
+  it("publishes concise Cosense authoring conventions in server discovery", async () => {
+    const response = await modernRequest(
+      createHandler(createStubClient()),
+      "server/discover",
+    );
+    expect(response.error).toBeUndefined();
+
+    const result = response.result as {
+      cacheScope: string;
+      instructions: string;
+      ttlMs: number;
+    };
+
+    expect(result).toMatchObject({
+      ttlMs: 0,
+      cacheScope: "private",
+    });
+    expect(result.instructions).toContain("raw Cosense syntax, not Markdown");
+    expect(result.instructions).toContain("leading half-width spaces or tabs");
+    expect(result.instructions).toContain(
+      "inspect a similar page when practical",
+    );
+    expect(result.instructions).toContain("explicit user approval");
+    expect(result.instructions.length).toBeLessThan(1_000);
+  });
+
   it("publishes fixed-project read and write tools with private no-cache metadata", async () => {
     const response = await modernRequest(
       createHandler(createStubClient()),
