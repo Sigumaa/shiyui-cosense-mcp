@@ -1,12 +1,27 @@
 # Cosense read-only版 Remote MCP 調査報告
 
-> 2026-08-13までのread-only版の調査スナップショット。現在のwrite設計は [write-design.md](write-design.md) を参照する。
+> 2026-08-13までのread-only版の調査スナップショット。本文中の「現行」は原則としてこの時点を指す。2026-08-14のwrite導入時点は [write-design.md](write-design.md)、その後の変更は下記「2026-08-15 現行仕様への追補」とsourceを参照する。
 
 調査日: 2026-08-12（JST）
 
 設計更新: 2026-08-13（JST）
 
 状態: Cosense Personal Access Token（PAT）を必須とする実装へ更新し、既存4 toolについてPublicの `shiyui` に対するPAT付きlocal live smokeを完了。`list_pages` と `get_page_changes` を加えた6-tool版もProductionへdeploy済みだが、追加2 toolのlive smokeは未実施。Cloudflare Access設定とMCP OAuth構成は変更していない。ChatGPTからのread callとPrivate projectでの確認も未実施。
+
+## 2026-08-15 現行仕様への追補
+
+この調査後、固定project `shiyui` に対する `create_page`、`append_to_page`、`update_page`、`replace_links` を追加した。さらに個人用MCPの通常利用を妨げていた独自上限と会話手順を次のように見直した。
+
+- `search_full_text`、`search_vector`、`get_related_pages` の `limit` は既定20、最大100とする。
+- `list_pages` の `limit` は既定20、最大1000とする。1 callは一覧GET 1件だけで、追加pageは呼び出し側が `nextSkip` を明示して再度呼んだときだけ取得する。
+- relatedの続きも、呼び出し側が `nextCursor` を次callへ明示したときだけ取得する。自動pagination、N+1、再帰的な全件走査は行わない。
+- `get_page_changes` は最新100 eventまで返し、before / afterは各2000文字までとする。候補一覧のcontextを抑えるため、全文検索snippetは5行・1200文字、page descriptionは5件・各240文字、matched wordsは20件、actor名は200文字、`replace_links` のmessageは2000文字までとする。`get_page` の本文は短縮しない。
+- write本文の文字数、行数、生成change数にMCP独自の固定上限を設けない。NUL等の不正入力は拒否し、title、query、pageId、commitId、cursor等の500文字上限はWorkerが安全にURL componentを構築する境界として維持する。
+- ユーザーが書き込み意思と対象を明確に依頼していれば、その範囲でLLMが最終文面を整えてwriteできる。最終文字列の再提示とexactな再承認は必須にしない。意図が曖昧な場合や依頼範囲を超える場合だけ確認する。
+- readは、最新commitの取得や競合判定など操作に技術的に必要な場合だけ行う。安全ポリシーだけを理由に固定の `read -> confirmation -> write` を要求しない。
+- renameとproject内link置換が同じ明確な依頼に含まれる場合は、rename成功後の実titleを使って `replace_links` を連続実行できる。依頼されていないlink置換は推測して実行しない。
+
+一方、create時の既存page確認、`expectedCommitId` とpage IDによる競合・rename・replacement検知、preview内容の完全一致、submit直前の状態再確認、結果不明な非冪等writeの自動再送禁止、429と一時障害に対する攻撃的retryの禁止、PAT・Cloudflare Access・固定origin/project・redirect no-followは維持する。成功するpage editは最大でも `GET -> preview -> GET -> submit`、`replace_links` は1 POSTであり、1回の操作から無制限にrequestを増やさない。
 
 ## 結論
 
@@ -17,9 +32,9 @@
 - Cosense 自身のタイトル・リンク記法ベクトル検索
 - 1-hop / 2-hop の関連ページ取得と絞り込み
 
-この匿名観測はendpoint調査時のbaselineとしてだけ残す。現行設計はPublic / Privateを分岐せず、6 toolから発生するすべての `shiyui` 固定GETにPATを送る。Public dataが匿名で取得できる場合も、匿名fallbackは行わない。
+この匿名観測はendpoint調査時のbaselineとしてだけ残す。2026-08-13時点のread-only設計はPublic / Privateを分岐せず、6 toolから発生するすべての `shiyui` 固定GETにPATを送る。Public dataが匿名で取得できる場合も、匿名fallbackは行わない。このPAT境界はwrite導入後も維持する。
 
-現行MCPは、次の6 toolに限定する。
+2026-08-13時点のMCPは、次の6 toolに限定していた。
 
 1. `get_page`
 2. `search_full_text`
@@ -34,7 +49,7 @@ MCP endpoint自体は引き続きCloudflare Access Managed OAuthで一人だけ�
 
 本人確認は許可email 1件 + One-time PINのAccess policyに委譲する。Workerは署名、issuer、Application Audience、有効期限だけを検証し、同じemail判定やcustom scopeを重複実装しない。
 
-Cloudflare Dashboardで、Workers Free、Zero Trust Teams Free Base、通常のFree Planだけがactiveであることを2026-08-12に確認した。Workers Paidへupgradeせず、KV、Durable Objects、D1、R2、Queues、Workers AIも使わない。Workers Freeは1日100,000 requestまでで、上限超過後は追加requestが失敗するため従量課金へ移行しない。Cosenseへのsubrequestも課金対象ではなく、1 tool callあたり最大2件、自動retryなしとする。[Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/) [Zero Trust pricing](https://www.cloudflare.com/plans/zero-trust-services/)
+Cloudflare Dashboardで、Workers Free、Zero Trust Teams Free Base、通常のFree Planだけがactiveであることを2026-08-12に確認した。Workers Paidへupgradeせず、KV、Durable Objects、D1、R2、Queues、Workers AIも使わない。Workers Freeは1日100,000 requestまでで、上限超過後は追加requestが失敗するため従量課金へ移行しない。Cosenseへのsubrequestも課金対象ではなく、当時のread tool callは最大2件、自動retryなしとした。[Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/) [Zero Trust pricing](https://www.cloudflare.com/plans/zero-trust-services/)
 
 ## 調査範囲と根拠
 
@@ -145,7 +160,7 @@ read-only commandのHTTP requestはGETである。多くの command は本体 GE
 - `previewEdit`: `/api/pages/v2/{project}/page-edit-for-ai/preview` へ POSTし、5分のserver-side preview stateを作る。
 - `submitEdit`: `/api/pages/v2/{project}/page-edit-for-ai/submit` へ POSTし、pageをcommitする。
 
-これらの code と dependency は現行MCPに含めない。
+これらのcodeとdependencyは2026-08-13時点のread-only MCPには含めない方針だった。2026-08-14にpreview / submitとlink置換を使う4つの名前付きwrite toolを追加したが、公式CLI自体はdependencyにしていない。
 
 ### CLIの認証・request処理
 
@@ -162,7 +177,7 @@ CLIは source-levelの型を期待するが、runtime response schemaを検証�
 
 公式Skillは、themeを探す際にvector queryを複数の言い換えで試し、候補を選んでからpage本文を読み、必要な場合だけ1/2-hopへ深める手順を勧めている。vectorはtitleとlink記法だけなので、本文語を探す場合はfull-textを使い分ける。すべての関連pageを読むのではなく、description、relation、pageRankから選ぶ。[read-page workflow](https://github.com/helpfeel/cosense-cli/blob/70c62293e3755a43f87e58e8dc59e9e896afcbcb/skills/cosense/read-page.md)
 
-通常の閲覧はAI向けに整形する `browsePage`、edit anchorや機械処理が必要な場合だけraw寄りの `readPage` という境界も明記されている。今回のMCPはwriteを持たないため、`get_page` は本文とfreshness識別子だけを返し、line IDを返さない。変更履歴は `get_page` の `pageId` / `commitId` を起点に、1 pageの説明可能な変更だけを返す。Skillはwriteをユーザーの明示指示時だけ許可する方針である。[Skill routing](https://github.com/helpfeel/cosense-cli/blob/70c62293e3755a43f87e58e8dc59e9e896afcbcb/skills/cosense/SKILL.md)
+通常の閲覧はAI向けに整形する `browsePage`、edit anchorや機械処理が必要な場合だけraw寄りの `readPage` という境界も明記されている。2026-08-13時点のMCPはwriteを持たなかったため、`get_page` は本文とfreshness識別子だけを返し、line IDを返さない設計とした。この出力境界はwrite導入後も維持し、write clientが操作中だけline IDを取得・検証する。変更履歴は `get_page` の `pageId` / `commitId` を起点に、1 pageの説明可能な変更だけを返す。Skillはwriteをユーザーの明示指示時だけ許可する方針である。[Skill routing](https://github.com/helpfeel/cosense-cli/blob/70c62293e3755a43f87e58e8dc59e9e896afcbcb/skills/cosense/SKILL.md)
 
 ## Cosense read機能の整理
 
@@ -215,7 +230,7 @@ UIのQuick Searchは、先頭5件のQuick Search、vector、残りのQuick Searc
 
 hop responseのpaginationは `{perPage,total,hasNext,nextId}`、既定 `perPage=1000` である。次pageは `nextId` と `perPage` をqueryに渡すことを、2026-08-12の公式Web client asset `assets-20260810-073323` で確認した。[official web bundle](https://scrapbox.io/assets/chunks/chunk-BZ7AQD4N.js)
 
-現行の `get_related_pages` は一覧を文脈候補として返し、本文は返さない。上位候補を取得後に `get_page` を使う。起点pageも取得して1-hopのrelationを計算する。大量列挙ではなく選択が目的なので、toolの `limit` は最大20とし、upstreamへ同じ値を `perPage` として渡す。受信した候補にも同じ上限を適用する。`hasNext` がtrueなら `nextId` をopaqueな `nextCursor` として返し、次callの `cursor` で続きから取得する。
+2026-08-13時点の `get_related_pages` は一覧を文脈候補として返し、本文は返さない。上位候補を取得後に `get_page` を使う。起点pageも取得して1-hopのrelationを計算する。当時はtoolの `limit` を最大20としたが、2026-08-15に最大100へ緩和した。いずれもupstreamへ同じ値を `perPage` として渡し、受信候補にも適用する。`hasNext` がtrueなら `nextId` をopaqueな `nextCursor` として返し、次callの `cursor` で明示的に続きから取得する。
 
 Smart Contextは1 requestで大量本文を取れる利点があるが、次の理由で採用しない。
 
@@ -242,7 +257,7 @@ Smart Contextは1 requestで大量本文を取れる利点があるが、次の�
 
 03-08の対話context export/import、03-17のPR review、04-06のsubagent consultation等、AI Agent向けSkillの追加も記録されている。これらはCosense RESTのread endpointではなく、今回のMCP toolとして移植しない。API利用方法とPAT headerは、公式リリースノートだけでなくHelpfeel公式CLIの固定commit `70c6229` と過去の本番実測で補った。
 
-固定commit `70c6229` の公式CLIは Pages v2 と分割hop endpointを使う一方、hopの `pagination.nextId` を処理しない。現行MCPは大量pageを一括取得せず、`perPage=limit` と `nextId` cursorで必要な続きだけ取得できるようにする。
+固定commit `70c6229` の公式CLIは Pages v2 と分割hop endpointを使う一方、hopの `pagination.nextId` を処理しない。2026-08-13のread-only MCPでは、大量pageを一括取得せず、`perPage=limit` と `nextId` cursorで必要な続きだけを明示的に取得できるようにした。この手動pagination境界は現在も維持する。
 
 ## 最新性、cache、index、rate limit
 
@@ -277,7 +292,7 @@ MCP responseにも `Cache-Control: no-store` を付け、Cache API、Cache Rules
 | `connect.sid`            | browser session相当                                      | Cloudflare Secret        | 不採用                      |
 | Smart Context signed URL | private contextの一時download。発行flowとstateが別途必要 | 発行時にcredentialが必要 | 不採用                      |
 
-Public / Privateを同じrequest pathで扱うため、PATを「Privateのときだけ」付ける分岐は置かない。6 toolが行う1 callあたり1–2件のGETすべてに同じ `COSENSE_PAT` を付与する。Service Account、session、匿名へfallbackしない。
+Public / Privateを同じrequest pathで扱うため、PATを「Privateのときだけ」付ける分岐は置かない。read-only版の6 toolが行う1 callあたり1–2件のGETすべてに同じ `COSENSE_PAT` を付与する。write導入後も全Cosense requestで同じ境界を使い、Service Account、session、匿名へfallbackしない。
 
 PATは `https://scrapbox.io/settings/personal-access-tokens` で発行する。Helpfeel公式CLIはPATを `x-personal-access-token` として送るが、これは現行sourceに基づく実装上の先例であり、PAT APIが正式に文書化された安定契約だとは断定しない。[login guidance](https://github.com/helpfeel/cosense-cli/blob/70c62293e3755a43f87e58e8dc59e9e896afcbcb/skills/cosense/login.md#L6-L17) [request implementation](https://github.com/helpfeel/cosense-cli/blob/e06bc890958cfe8d1b6fe932db06c35eb8c8577d/src/lib/request.ts#L44-L78)
 
@@ -285,11 +300,11 @@ PATは `https://scrapbox.io/settings/personal-access-tokens` で発行する。H
 
 `COSENSE_PAT` が存在しない場合とtrim後に空の場合は、Cosenseへrequestせず設定エラーにする。Cosenseから `401` または `403` が返った場合は、どちらも同じ認証失敗に変換する。client resultとlogへPAT、upstream body、statusごとの推測を含めない。PATの期限、自動更新、事前通知、`401` と `403` の区別は公開仕様として確認できていないため、失敗時はPATを手動で再発行・再登録して確認する。
 
-将来Smart Contextやfile抽出textが必要になっても、現行6-tool構成へ暗黙に追加しない。credential方式とデータ境界を改めて評価する。
+将来Smart Contextやfile抽出textが必要になっても、公開toolへ暗黙に追加しない。credential方式とデータ境界を改めて評価する。
 
-## 推奨MCP tool仕様
+## 2026-08-13時点の推奨read tool仕様
 
-projectはsource定数 `shiyui` とし、tool引数にproject、URL、credentialを持たせない。6 toolから発生する全GETにはWorker secret `COSENSE_PAT` を `x-personal-access-token` として付与する。MCP endpoint全体をAccess policyで保護し、各toolは `annotations.readOnlyHint: true`、`openWorldHint: true` とする。外部CosenseへGETするため `openWorldHint` はfalseにしない。現行specで `destructiveHint` / `idempotentHint` は `readOnlyHint:false` の場合だけ意味を持つため、read toolでは省略する。
+projectはsource定数 `shiyui` とし、tool引数にproject、URL、credentialを持たせない。当時の6 toolから発生する全GETにはWorker secret `COSENSE_PAT` を `x-personal-access-token` として付与する。MCP endpoint全体をAccess policyで保護し、各read toolは `annotations.readOnlyHint: true`、`openWorldHint: true` とする。外部CosenseへGETするため `openWorldHint` はfalseにしない。現行specで `destructiveHint` / `idempotentHint` は `readOnlyHint:false` の場合だけ意味を持つため、read toolでは省略する。
 
 ### `get_page`
 
@@ -335,7 +350,7 @@ projectはsource定数 `shiyui` とし、tool引数にproject、URL、credential
 }
 ```
 
-`sort` は `updated | created | accessed | linked | views | title`、`limit` は1–20、`skip` は0以上の明示的なoffsetとする。処理は `GET /api/pages/shiyui/?sort=&limit=&skip=` の1 requestだけで完結する。公式CLIの `listPages` は同じ一覧GET後にusersを取得するが、MCPはactorを返さないためusers GETを行わない。[official CLI listPages](https://github.com/helpfeel/cosense-cli/blob/e06bc890958cfe8d1b6fe932db06c35eb8c8577d/src/commands/listPages.ts#L132-L153)
+`sort` は `updated | created | accessed | linked | views | title`、`skip` は0以上の明示的なoffsetとする。2026-08-13時点の `limit` は1–20だったが、現在は既定20、最大1000である。処理は `GET /api/pages/shiyui/?sort=&limit=&skip=` の1 requestだけで完結する。公式CLIの `listPages` は同じ一覧GET後にusersを取得するが、MCPはactorを返さないためusers GETを行わない。[official CLI listPages](https://github.com/helpfeel/cosense-cli/blob/e06bc890958cfe8d1b6fe932db06c35eb8c8577d/src/commands/listPages.ts#L132-L153)
 
 出力は `reportedCount`、`skip`、`returned`、`hasNext`、任意の `nextSkip` と、各pageの `pageId`、`title`、短いdescriptions、作成・更新・アクセス時刻、page metrics、canonical URLに限定する。本文、user情報、raw responseは返さない。一覧取得後のdetail GET、N+1、自動pagination、全件走査を行わず、続きはLLMまたはユーザーが `nextSkip` を次callの `skip` に明示したときだけ取得する。
 
@@ -354,7 +369,7 @@ projectはsource定数 `shiyui` とし、tool引数にproject、URL、credential
 
 処理は対象pageのcommits GETと、actor名解決に必要な `GET /api/projects/shiyui/users` の2 requestを並列実行する。この2件だけで完結し、`get_page`、関連page、他pageの履歴は取得しない。自動retry、pagination、再帰取得も行わない。
 
-出力は `pageId`、任意の `afterCommitId`、`commitCount`、`totalChanges`、`returned`、`truncated`、任意の `latestCommitId` / `latestTitleChange` と、説明可能な変更eventを返す。eventはtitle、insert、update、delete、actor name、時刻、任意のbefore/afterだけとする。最新50 eventを上限とし、before/afterは各500文字までに切り詰める。email、user ID、line ID、派生metadata、raw commitは返さない。
+出力は `pageId`、任意の `afterCommitId`、`commitCount`、`totalChanges`、`returned`、`truncated`、任意の `latestCommitId` / `latestTitleChange` と、説明可能な変更eventを返す。eventはtitle、insert、update、delete、actor name、時刻、任意のbefore/afterだけとする。2026-08-13時点は最新50 event、before / after各500文字だったが、現在は最新100 event、各2000文字までとする。email、user ID、line ID、派生metadata、raw commitは返さない。
 
 ### `search_full_text`
 
@@ -369,9 +384,9 @@ projectはsource定数 `shiyui` とし、tool引数にproject、URL、credential
 }
 ```
 
-`match` は `and | or`、`sort` は `pageRank | updated`、`limit` は1–20。現行responseは `limit:100` と報告し、指定したlimit/skipを無視したため、MCPは受信候補を最大20件にsliceする。upstreamのhard maximumは未確認である。
+`match` は `and | or`、`sort` は `pageRank | updated`。2026-08-13時点の `limit` は1–20だったが、現在は既定20、最大100である。観測したupstream responseは `limit:100` と報告し、指定したlimit/skipを無視したため、MCPは受信候補を指定limitでsliceする。upstreamのhard maximumは未確認である。
 
-出力は `reportedCount`、`exactTitleMatch`、`returned`、`truncated` と、各候補の `title`、一致snippet、matched words、`updatedAt`、`pageRank`、canonical URLに限定する。本文全体は返さない。
+出力は `reportedCount`、`exactTitleMatch`、`returned`、`truncated` と、各候補の `title`、最大5行・1200文字の一致snippet、最大20件のmatched words、`updatedAt`、`pageRank`、canonical URLに限定する。本文全体は返さない。
 
 ### `search_vector`
 
@@ -384,7 +399,7 @@ projectはsource定数 `shiyui` とし、tool引数にproject、URL、credential
 }
 ```
 
-出力は `returned`、`localTruncated` と、各候補の `title`、`score`、`exists`、canonical URL。`updatedAt` と `pageRank` は `exists:true` の候補だけに付くoptional fieldとする。`localTruncated` は受信した配列を指定limitでsliceしたかだけを示し、upstreamの総数や続きが存在するかは表さない。vector endpointの総数・pagination方法は不明である。descriptionには「titleとlink記法のsemantic searchであり、通常本文は対象外」と明記し、`score`の絶対値に独自thresholdを置かない。
+`limit` は現在、既定20、最大100である。出力は `returned`、`localTruncated` と、各候補の `title`、`score`、`exists`、canonical URL。`updatedAt` と `pageRank` は `exists:true` の候補だけに付くoptional fieldとする。`localTruncated` は受信した配列を指定limitでsliceしたかだけを示し、upstreamの総数や続きが存在するかは表さない。vector endpointの総数・pagination方法は不明である。descriptionには「titleとlink記法のsemantic searchであり、通常本文は対象外」と明記し、`score`の絶対値に独自thresholdを置かない。
 
 ### `get_related_pages`
 
@@ -400,15 +415,15 @@ projectはsource定数 `shiyui` とし、tool引数にproject、URL、credential
 }
 ```
 
-`hop` は `1 | 2`。queryと `cursor` は任意、matchは `and | or`、limitは1–20。title、query、cursorは最大500文字。`limit` はupstreamの `perPage` と受信候補のlocal上限に使う。続きがある場合はresponseの `nextCursor` を次callの `cursor` に渡し、Workerはopaque stringとしてupstreamの `nextId` へ転送する。1-hopでは起点pageも取得し、`outgoing | incoming | bidirectional` を計算する。2-hopはrelationを付けない。
+`hop` は `1 | 2`。queryと `cursor` は任意、matchは `and | or`。2026-08-13時点の `limit` は1–20だったが、現在は既定20、最大100である。title、query、cursorは最大500文字。`limit` はupstreamの `perPage` と受信候補のlocal上限に使う。続きがある場合はresponseの `nextCursor` を次callの `cursor` に渡し、Workerはopaque stringとしてupstreamの `nextId` へ転送する。1-hopでは起点pageも取得し、`outgoing | incoming | bidirectional` を計算する。2-hopはrelationを付けない。
 
-出力は候補の `title`、短いdescriptions、relation、`pageRank`、`linked`、`updatedAt`、canonical URL、upstream paginationの `total`、`hasNext`、`nextCursor`。page本文は返さない。
+出力は候補の `title`、最大5件・各240文字のdescriptions、relation、`pageRank`、`linked`、`updatedAt`、canonical URL、upstream paginationの `total`、`hasNext`、`nextCursor`。page本文は返さない。`list_pages` のdescriptionsも同じ境界とする。
 
 ### MCP resultの形
 
 各toolは、人間向けの `title`、機械可読な `outputSchema`、短い `content`、`structuredContent` を返す。巨大なraw JSONや同じ本文の重複は避ける。現在のMCP tool call resultは `resultType: "complete"` を要求する。`tools/list` には `resultType: "complete"`、`ttlMs: 0`、`cacheScope: "private"` を設定し、認証された一人用tool metadataをprotocol上もcacheしない。SDKが実際にこの形を出すことをcontract testで確認する。[MCP tools](https://modelcontextprotocol.io/specification/2026-07-28/server/tools) [OpenAI MCP build guide](https://developers.openai.com/plugins/build/mcp-server)
 
-## 現行MCPへ採用しない機能
+## 2026-08-13時点のread-only MCPへ採用しない機能
 
 | 機能                                   | 理由                                                                       |
 | -------------------------------------- | -------------------------------------------------------------------------- |
@@ -424,9 +439,13 @@ projectはsource定数 `shiyui` とし、tool引数にproject、URL、credential
 | cache / background sync / cron         | 最新性を損ね、運用対象を増やす                                             |
 | D1 / R2 / Queue / MCP用Durable Object  | stateless tool callには不要                                                |
 
+page writeの不採用はread-only要件に基づく当時の判断であり、2026-08-14に4つの名前付きwrite toolを追加した。任意project / URL、raw line operation、WebSocket、background処理を持たない境界は維持する。
+
 ## Cloudflare Workers / MCP / OAuth
 
 ### Architecture
+
+以下は2026-08-13時点のread-only構成である。現在は同じ認証・固定project境界の内側に4つの名前付きwrite toolと、許可済みのpreview / submit / replace links POSTを追加している。
 
 ```text
 ChatGPT
@@ -473,7 +492,7 @@ Managed OAuthはAccess edgeをOAuth authorization serverにする。Protected Re
 - One-time PINを本人確認に使える。
 - OAuthのstateとtokenをWorkerで保存しない。
 - Worker側のOAuth secretとKVが不要になる。
-- 6 toolすべて同じread-only権限なのでcustom scopeを設けない。
+- 2026-08-13時点の6 read toolは同じ権限なのでcustom scopeを設けない。write導入後も一人用MCPをtool単位のcustom scopeへ分割しない。
 
 Access for SaaSのGeneric OIDC applicationは使用しない。Self-hosted Access applicationでWorkerの公開hostnameを保護し、Managed OAuthとDCRを有効にする。Access policyはIncludeを本人のemail 1件にし、identity providerはOne-time PINだけを利用可能にする。
 
@@ -497,13 +516,13 @@ Managed OAuthのclient bearerはopaqueであり、Workerでdecodeしない。Acc
 
 - originは `https://scrapbox.io` 固定。
 - projectは `shiyui` 固定。
-- tool入力はtitle、query、pageId、commitId、enum、上限付きlimit、非負のoffsetだけ。
+- tool入力は固定されたread / write操作に必要なtitle、query、pageId、commitId、text、body、enum、上限付きlimit、非負のoffsetだけ。
 - LLMからURL、project、header、credential、file pathを受け取らない。
 - allowlist済みpath builder以外をfetchしない。
-- HTTP methodはGETだけ。write endpoint文字列、WebSocket dependency、edit operationをsourceに置かない。
+- HTTP methodとpathは、allowlist済みのGET、page edit preview / submit、project内link置換POSTだけに限定する。WebSocket、raw line operation、任意endpointを公開しない。
 - `COSENSE_PAT` はCloudflare SecretまたはGit管理外のlocal `.dev.vars` にだけ保存する。
 - `COSENSE_PAT` が未設定または空ならupstream requestを送らず失敗する。
-- Public / Privateにかかわらず、全Cosense GETへ `x-personal-access-token` を付与する。
+- Public / Privateにかかわらず、全Cosense requestへ `x-personal-access-token` を付与する。
 - Service Account、`connect.sid`、匿名requestへfallbackしない。
 - Workerの公開hostname全体をAccess applicationで保護する。
 - Preview URLは使用せず、`wrangler.jsonc` とCloudflare上で無効にする。
@@ -517,9 +536,9 @@ Managed OAuthのclient bearerはopaqueであり、Workerでdecodeしない。Acc
 - その他のupstream errorもbodyをそのままLLMへ返さない。
 - email、user ID、line IDをresponseから除外する。変更履歴のactorはnameだけを返す。
 
-## 受け入れテスト
+## 2026-08-13時点のread-only受け入れテスト
 
-最低限次を確認する。
+以下はread-only版について当時確認対象とした項目であり、当時の上限値を調査履歴として残す。現在のlimit、write、競合、preview、retry方針は冒頭の追補とsourceのtestで確認する。
 
 | 対象             | 確認内容                                                                                             |
 | ---------------- | ---------------------------------------------------------------------------------------------------- |
@@ -560,22 +579,22 @@ Managed OAuthのclient bearerはopaqueであり、Workerでdecodeしない。Acc
 
 ## Maintenance risk
 
-| risk                         | 影響                                     | 対応                                                                                     |
-| ---------------------------- | ---------------------------------------- | ---------------------------------------------------------------------------------------- |
-| Cosense内部APIの予告なし変更 | field/path/queryが壊れる                 | 必要なread pathだけに限定、used fieldだけ検証、明確に失敗、公式CLI/releaseを更新時に確認 |
-| vector/full-text index遅延   | 検索直後に新pageが出ない                 | 候補選択後は必ずPages v2。SLAを約束しない                                                |
-| response上限の変更           | 検索候補が欠落                           | observed valueを仕様化せず、returned/truncatedを返す                                     |
-| related pagination変更       | 続きの候補が取れない                     | `perPage=limit`、`hasNext/nextId`をopaque cursorとして往復                               |
-| rate limit非公開             | 429や一時失敗                            | 1 call 1–2 request、N+1回避。429を明示し、無制限retryしない                              |
-| PAT失効・header仕様変更      | 全toolのCosense GETが失敗                | 401/403を安全な認証失敗へ変換し、公式CLI source確認後に手動再発行・Secret差し替え        |
-| PAT漏洩                      | user権限の範囲でCosense dataへアクセス   | Cloudflare Secretだけに保存し、input、response、log、Gitへ出さない                       |
-| OAuth / MCPの変更            | ChatGPT接続が壊れる                      | Cloudflare Accessとcurrent SDKへ委譲し、独自互換layerを足さない                          |
-| Access設定の誤り             | 意図しない利用者への公開、または接続失敗 | exact email 1件、One-time PINのみ、team domain、Application Audienceを確認               |
-| ChatGPT protocol revision差  | discovery/call不成立                     | 実利用で確認し、観測した問題だけを直す                                                   |
+| risk                         | 影響                                     | 対応                                                                                                             |
+| ---------------------------- | ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Cosense内部APIの予告なし変更 | field/path/queryが壊れる                 | 必要なread pathだけに限定、used fieldだけ検証、明確に失敗、公式CLI/releaseを更新時に確認                         |
+| vector/full-text index遅延   | 検索直後に新pageが出ない                 | 候補選択後は必ずPages v2。SLAを約束しない                                                                        |
+| response上限の変更           | 検索候補が欠落                           | observed valueを仕様化せず、returned/truncatedを返す                                                             |
+| related pagination変更       | 続きの候補が取れない                     | `perPage=limit`、`hasNext/nextId`をopaque cursorとして往復                                                       |
+| rate limit非公開             | 429や一時失敗                            | readは1 call 1–2 request、page editは最大4 request、link置換は1 request。N+1を避け、429を明示し、自動retryしない |
+| PAT失効・header仕様変更      | 全toolのCosense requestが失敗            | 401/403を安全な認証失敗へ変換し、公式CLI source確認後に手動再発行・Secret差し替え                                |
+| PAT漏洩                      | user権限の範囲でCosense dataへアクセス   | Cloudflare Secretだけに保存し、input、response、log、Gitへ出さない                                               |
+| OAuth / MCPの変更            | ChatGPT接続が壊れる                      | Cloudflare Accessとcurrent SDKへ委譲し、独自互換layerを足さない                                                  |
+| Access設定の誤り             | 意図しない利用者への公開、または接続失敗 | exact email 1件、One-time PINのみ、team domain、Application Audienceを確認                                       |
+| ChatGPT protocol revision差  | discovery/call不成立                     | 実利用で確認し、観測した問題だけを直す                                                                           |
 
-## 確定した設計
+## 2026-08-13時点で確定したread-only設計
 
-Cosense側はCloudflare Secret `COSENSE_PAT` を必須とし、Public / Privateを同じPAT付きGETで読む。未設定・空はfail closed、upstreamの `401` / `403` はtokenとbodyを含まない認証失敗にする。toolは上記6つだけで、write、任意project、任意URL、本文cache、credential fallbackを持たない。`list_pages` は一覧GET 1件、`get_page_changes` は対象pageのcommits/users並列2 GETだけとし、自動pagination、N+1、retry、他pageへの展開を行わない。MCP clientの本人確認は従来どおりCloudflare Access Managed OAuth、許可email 1件、One-time PINとする。
+Cosense側はCloudflare Secret `COSENSE_PAT` を必須とし、Public / Privateを同じPAT付きGETで読む。未設定・空はfail closed、upstreamの `401` / `403` はtokenとbodyを含まない認証失敗にする。当時のtoolは上記6つだけで、write、任意project、任意URL、本文cache、credential fallbackを持たない。`list_pages` は一覧GET 1件、`get_page_changes` は対象pageのcommits/users並列2 GETだけとし、自動pagination、N+1、retry、他pageへの展開を行わない。MCP clientの本人確認はCloudflare Access Managed OAuth、許可email 1件、One-time PINとした。writeの追加とlimit・会話手順の後続変更は冒頭の2026-08-15追補を参照する。
 
 ## 調査成果物20項目の対応
 
@@ -591,7 +610,7 @@ Cosense側はCloudflare Secret `COSENSE_PAT` を必須とし、Public / Private�
 |    13 | related / hop / Smart Context | 同名節                                            |
 |    14 | 2026年release                 | 「2026年の関連release」                           |
 |    15 | 最新性 / cache / index        | 同名節                                            |
-| 16–17 | 採用 / 不採用                 | tool仕様、現行MCPへ採用しない機能                 |
+| 16–17 | 採用 / 不採用                 | tool仕様、2026-08-13時点の不採用機能              |
 |    18 | credential比較                | credential選択表                                  |
 |    19 | 推奨最終構成                  | 結論、Cloudflare architecture                     |
 |    20 | maintenance risk              | risk表                                            |

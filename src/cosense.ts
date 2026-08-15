@@ -2,67 +2,74 @@ import { z } from "zod";
 
 const ORIGIN = "https://scrapbox.io";
 const PROJECT = "shiyui";
-const DEFAULT_LIMIT = 10;
-const MAX_INPUT_LENGTH = 500;
-const MAX_CHANGE_EVENTS = 50;
-const MAX_CHANGE_TEXT_LENGTH = 500;
+const DEFAULT_LIMIT = 20;
+const MAX_URL_COMPONENT_LENGTH = 500;
+const MAX_CANDIDATE_LIMIT = 100;
+const MAX_LIST_LIMIT = 1_000;
+const MAX_CHANGE_EVENTS = 100;
+const MAX_CHANGE_TEXT_LENGTH = 2_000;
+const MAX_OPERATION_MESSAGE_LENGTH = 2_000;
 const MAX_AUTHOR_LENGTH = 200;
-const MAX_WRITE_TEXT_LENGTH = 10_000;
-const MAX_WRITE_LINES = 100;
 const REQUEST_TIMEOUT_MS = 15_000;
 
 const nonBlankString = z
   .string()
-  .max(MAX_INPUT_LENGTH)
-  .refine((value) => value.trim().length > 0, {
-    message: "Must not be blank",
-  });
+  .trim()
+  .min(1, { message: "Must not be blank" })
+  .max(MAX_URL_COMPONENT_LENGTH);
 const pageTitleSchema = nonBlankString.refine(
-  (value) => value.trim() !== "." && value.trim() !== "..",
+  (value) => value !== "." && value !== "..",
   { message: "Dot-segment titles are not supported" },
 );
-const limitSchema = z.number().int().min(1).max(20);
+const candidateLimitSchema = z.number().int().min(1).max(MAX_CANDIDATE_LIMIT);
+const listLimitSchema = z.number().int().min(1).max(MAX_LIST_LIMIT);
 
-const getPageInputSchema = z
+export const getPageInputSchema = z
   .object({
     title: pageTitleSchema,
   })
   .strict();
 
-const searchFullTextInputSchema = z
+export const searchFullTextInputSchema = z
   .object({
     query: nonBlankString,
     match: z.enum(["and", "or"]).optional().default("and"),
     sort: z.enum(["pageRank", "updated"]).optional().default("pageRank"),
-    limit: limitSchema.optional().default(DEFAULT_LIMIT),
+    limit: candidateLimitSchema.optional().default(DEFAULT_LIMIT),
   })
   .strict();
 
-const searchVectorInputSchema = z
+export const searchVectorInputSchema = z
   .object({
     query: nonBlankString,
-    limit: limitSchema.optional().default(DEFAULT_LIMIT),
+    limit: candidateLimitSchema.optional().default(DEFAULT_LIMIT),
   })
   .strict();
 
-const getRelatedPagesInputSchema = z
+export const getRelatedPagesInputSchema = z
   .object({
     title: pageTitleSchema,
-    hop: z.union([z.literal(1), z.literal(2)]),
+    hop: z.union([z.literal(1), z.literal(2)]).default(1),
     query: nonBlankString.optional(),
     match: z.enum(["and", "or"]).optional().default("and"),
-    limit: limitSchema.optional().default(DEFAULT_LIMIT),
-    cursor: z.string().min(1).max(MAX_INPUT_LENGTH).optional(),
+    limit: candidateLimitSchema.optional().default(DEFAULT_LIMIT),
+    cursor: z
+      .string()
+      .max(MAX_URL_COMPONENT_LENGTH)
+      .refine((value) => value.trim().length > 0, {
+        message: "Must not be blank",
+      })
+      .optional(),
   })
   .strict();
 
-const listPagesInputSchema = z
+export const listPagesInputSchema = z
   .object({
     sort: z
       .enum(["updated", "created", "accessed", "linked", "views", "title"])
       .optional()
       .default("updated"),
-    limit: limitSchema.optional().default(DEFAULT_LIMIT),
+    limit: listLimitSchema.optional().default(DEFAULT_LIMIT),
     skip: z
       .number()
       .int()
@@ -73,65 +80,57 @@ const listPagesInputSchema = z
   })
   .strict();
 
-const getPageChangesInputSchema = z
+export const getPageChangesInputSchema = z
   .object({
     pageId: pageTitleSchema,
     commitId: nonBlankString.optional(),
   })
   .strict();
 
-const writeTextSchema = z
-  .string()
-  .max(MAX_WRITE_TEXT_LENGTH)
-  .refine((value) => value.trim().length > 0, {
-    message: "Must not be blank",
-  })
-  .refine((value) => !value.includes("\0"), {
-    message: "Must not contain NUL",
-  })
-  .refine((value) => value.split(/\r?\n/).length <= MAX_WRITE_LINES, {
-    message: `Must not contain more than ${MAX_WRITE_LINES} lines`,
-  });
+const writeTextSchema = z.string().refine((value) => !value.includes("\0"), {
+  message: "Must not contain NUL",
+});
+const appendTextSchema = writeTextSchema.refine(
+  (value) => value.trim().length > 0,
+  { message: "Must not be blank" },
+);
 const writeTitleSchema = z
   .string()
   .trim()
   .min(1)
-  .max(MAX_INPUT_LENGTH)
+  .max(MAX_URL_COMPONENT_LENGTH)
   .refine((value) => value !== "." && value !== "..", {
     message: "Dot-segment titles are not supported",
   })
   .refine((value) => !/[\r\n\0]/.test(value), {
     message: "Must not contain CR, LF, or NUL",
   });
-const writeCommitIdSchema = z.string().trim().min(1).max(MAX_INPUT_LENGTH);
+const writeCommitIdSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(MAX_URL_COMPONENT_LENGTH);
 
-const createPageInputSchema = z
+export const createPageInputSchema = z
   .object({
     title: writeTitleSchema,
     text: writeTextSchema,
   })
   .strict();
 
-const appendToPageInputSchema = z
+export const appendToPageInputSchema = z
   .object({
     title: writeTitleSchema,
-    text: writeTextSchema,
+    text: appendTextSchema,
     expectedCommitId: writeCommitIdSchema,
   })
   .strict();
 
-const updateBodySchema = z
-  .string()
-  .max(MAX_WRITE_TEXT_LENGTH)
-  .refine((value) => !value.includes("\0"), {
-    message: "Must not contain NUL",
-  })
-  .refine(
-    (value) => value === "" || value.split(/\r?\n/).length <= MAX_WRITE_LINES,
-    { message: `Must not contain more than ${MAX_WRITE_LINES} lines` },
-  );
+const updateBodySchema = z.string().refine((value) => !value.includes("\0"), {
+  message: "Must not contain NUL",
+});
 
-const updatePageInputSchema = z
+export const updatePageInputSchema = z
   .object({
     title: writeTitleSchema,
     expectedCommitId: writeCommitIdSchema,
@@ -143,7 +142,7 @@ const updatePageInputSchema = z
     message: "At least one of body or newTitle is required",
   });
 
-const replaceLinksInputSchema = z
+export const replaceLinksInputSchema = z
   .object({
     fromTitle: writeTitleSchema,
     toTitle: writeTitleSchema,
@@ -338,7 +337,7 @@ const usersResponseSchema = z.object({
 });
 
 const editPreviewResponseSchema = z.object({
-  previewId: z.string().min(1).max(MAX_INPUT_LENGTH),
+  previewId: z.string().min(1),
   expireAt: z.string().min(1),
   pagePreview: z.object({
     title: z.string(),
@@ -353,7 +352,7 @@ const editPreviewResponseSchema = z.object({
 });
 
 const editSubmitResponseSchema = z.object({
-  commitId: z.string().min(1).max(MAX_INPUT_LENGTH),
+  commitId: z.string().min(1),
   page: z.object({ title: z.string() }),
 });
 
@@ -362,7 +361,7 @@ const editConflictResponseSchema = z.object({
 });
 
 const replaceLinksResponseSchema = z.object({
-  message: z.string().max(MAX_INPUT_LENGTH),
+  message: z.string(),
 });
 
 export type MatchMode = "and" | "or";
@@ -1128,12 +1127,6 @@ function buildUpdatePlan(
     changes.push({ _delete: oldLine.id });
   }
 
-  if (changes.length > MAX_WRITE_LINES) {
-    throw new Error(
-      `Page update must not require more than ${MAX_WRITE_LINES} changes.`,
-    );
-  }
-
   return {
     desiredTitle,
     changes,
@@ -1722,7 +1715,10 @@ export function createCosenseClient(
         );
       }
 
-      const lines = [parsed.title, ...parsed.text.split(/\r?\n/)];
+      const lines = [
+        parsed.title,
+        ...(parsed.text === "" ? [] : parsed.text.split(/\r?\n/)),
+      ];
       const changes = makeInsertChanges(lines);
       const preview = await requestWriteJson(
         fetcher,
@@ -1943,7 +1939,7 @@ export function createCosenseClient(
         action: "replace-links",
         fromTitle: parsed.fromTitle,
         toTitle: parsed.toTitle,
-        message: response.message,
+        message: response.message.slice(0, MAX_OPERATION_MESSAGE_LENGTH),
       };
     },
   };

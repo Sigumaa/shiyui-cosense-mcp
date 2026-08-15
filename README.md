@@ -27,25 +27,25 @@
 
 project、origin、URL、HTTP header、credential、file pathはtool引数に含めない。
 
-`list_pages` は `sort`、1–20の `limit`、明示的な `skip` を受け取り、一覧APIへの1 GETだけで完結する。page detailのN+1取得と自動paginationは行わない。
+`search_full_text`、`search_vector`、`get_related_pages` の `limit` は1–100、既定値は20とする。`list_pages` の `limit` は1–1000、既定値は20で、`sort` と明示的な `skip` を受け取る。いずれも指定された範囲だけを取得し、自動paginationやpage detailのN+1取得は行わない。続きが必要な場合は、返されたcursorまたは `nextSkip` を指定して改めて呼ぶ。
 
-`get_page_changes` は `get_page` が返す `pageId` と任意の `commitId` を受け取る。対象pageのcommitsとactor名解決用のproject usersを2 GETで並列取得し、他page、page本文、関連pageへ広げない。最新50件の変更に限定し、変更前後のtextは各500文字までとする。actorはnameだけを返し、email、user ID、line IDは返さない。
+`get_page_changes` は `get_page` が返す `pageId` と任意の `commitId` を受け取る。対象pageのcommitsとactor名解決用のproject usersを2 GETで並列取得し、他page、page本文、関連pageへ広げない。返却は最新100件の変更に限定し、変更前後のtextは各2000文字までとする。actorはnameだけを返し、email、user ID、line IDは返さない。
 
 ### Write
 
-write toolは、対象と正確な変更内容についてユーザーが書き込みを承認した後だけ呼ぶ。
+write toolは、ユーザーの書き込み意思と対象が明確な場合に呼ぶ。依頼の範囲内でLLMが文章を整えて実行でき、生成した最終文字列の再提示と再承認は必須にしない。意図が曖昧な場合や依頼範囲を超える場合だけ確認する。
 
-project固有の書き方・記法・編集方針の正本はCosenseの [`cosenseの書き方`](https://scrapbox.io/shiyui/cosense%E3%81%AE%E6%9B%B8%E3%81%8D%E6%96%B9) とする。MCP descriptionには、pageの作成・追記・更新前に `get_page` で正本を読むことと、通常のreadでは不要であることだけを記載する。操作固有の削除・競合・再実行条件は各tool descriptionに置く。
+project固有の書き方・記法・編集方針の正本はCosenseの [`cosenseの書き方`](https://scrapbox.io/shiyui/cosense%E3%81%AE%E6%9B%B8%E3%81%8D%E6%96%B9) とする。現在のcommit、page状態、既存の書式を判断するために必要な場合だけ `get_page` を使い、安全確認だけを目的とした一律のreadは要求しない。操作固有の削除・競合・再実行条件は各tool descriptionに置く。
 
 - `create_page` は同名の実pageがある場合に失敗する。既存pageへの追記へ切り替えない
-- `append_to_page` は直前の `get_page` が返した `commitId` を `expectedCommitId` として必須にする
-- `update_page` は直前の `get_page` が返した `commitId` を必須にし、title行を除く完成後の本文を `body` に指定する。`body` の省略は本文維持、空文字は本文全削除を表す。`body` を指定した場合、含めなかった既存行は削除される。任意の `newTitle` でタイトルも変更できる
-- `replace_links` はproject内の `[title]`、`#title`、`[title.icon]` を一括置換する。pageタイトルは変更せず、previewも行わないため、影響範囲を別に承認してから呼ぶ
-- page編集はpageが不存在、rename済み、または更新済みなら失敗する。最新pageを読み直し、内容を再確認してから実行する
-- create / appendのtextとupdateのbodyは最大10,000文字・100行。NULを拒否し、create / appendでは空白だけのtextも拒否する
+- `append_to_page` は対象の現在状態として取得済みの `commitId` を `expectedCommitId` として必須にする。既知の結果がcurrentなら確認だけの再readは行わない
+- `update_page` も対象の現在状態を示す `commitId` を必須にし、title行を除く完成後の本文を `body` に指定する。`body` の省略は本文維持、空文字は本文全削除を表す。`body` を指定した場合、含めなかった既存行は削除される。任意の `newTitle` でタイトルも変更できる
+- `replace_links` はproject内の `[title]`、`#title`、`[title.icon]` を一括置換する。pageタイトルは変更せず、previewも行わない。独立したtoolとして影響範囲を分離するが、ユーザーがrenameとlink更新をまとめて依頼した場合は追加確認なしで続けて実行できる
+- page編集はpageが不存在、rename済み、または更新済みなら失敗する。競合時とsubmit結果が不明な場合は、最新pageを読んでから次の操作を判断する
+- create / appendのtextとupdateのbodyにはMCP独自の文字数・行数・change数上限を設けない。NULを拒否し、appendは空白だけのtextも拒否する
 - create / append / updateは1 call内で `page-edit-for-ai/preview` と `submit` を各1回までとし、自動retryしない
 - submit結果が不明な場合は同じwriteを再実行せず、先に `get_page` で反映状態を確認する
-- タイトル変更後のlink置換は自動実行しない。`update_page` が返した実際のtitleを確認し、別の承認後に `replace_links` を呼ぶ
+- タイトル変更だけの依頼からlink置換を推測しない。link更新も明確に依頼されている場合は、`update_page` が返した実際のtitleを使って `replace_links` を続けて呼ぶ
 - `replace_links` の通信失敗または5xxは一部だけ反映済みの可能性がある。同じ `fromTitle` / `toTitle` だけを再実行できる
 
 preview ID、line ID、page ID、project、origin、credentialはwrite toolの引数に含めない。raw operationも公開しない。
@@ -135,7 +135,7 @@ ChatGPT Developer modeへ次を登録する。
 https://<worker-origin>/mcp
 ```
 
-初回接続でOne-time PIN認証を行い、10 toolの一覧と1回のread callを確認する。write確認は内容と対象を明示して別途行う。
+初回接続でOne-time PIN認証を行い、10 toolの一覧と1回のread callを確認する。writeの動作確認を行う場合は、対象と書き込み意思を明示して依頼する。
 
 ## Data boundary
 
@@ -145,6 +145,7 @@ https://<worker-origin>/mcp
 - responseにemail、user ID、line ID、raw API responseを含めない。変更履歴のactorはnameだけを返す
 - `list_pages` は1 GETだけとし、N+1取得、全件走査、自動paginationを行わない
 - `get_page_changes` は対象pageのcommitsとactor名解決用usersの2 GETだけとし、他pageへ広げない
+- title、query、pageId、commitId、cursorは500文字までとする。Workerの16 KiB URL境界を超えないための通信上の制約であり、page本文の利用制限ではない
 - writeは新規作成、末尾追記、完成形によるpage更新、link一括置換に限定し、同名存在またはcommit不一致から別操作へfallbackしない
 - 自動retry、polling、background同期、事前indexを行わない
 - PAT、OAuth token、Access assertion、page本文、queryをlogしない

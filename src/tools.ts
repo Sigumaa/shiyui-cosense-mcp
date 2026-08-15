@@ -6,13 +6,23 @@ import {
 import { z } from "zod";
 
 import {
+  appendToPageInputSchema,
+  createPageInputSchema,
   CosenseAuthenticationError,
   CosenseReplaceLinksRetryableError,
   CosenseResponseError,
   CosenseUpstreamError,
   CosenseWriteConflictError,
   CosenseWriteOutcomeUnknownError,
+  getPageChangesInputSchema,
+  getPageInputSchema,
+  getRelatedPagesInputSchema,
+  listPagesInputSchema,
+  replaceLinksInputSchema,
+  searchFullTextInputSchema,
+  searchVectorInputSchema,
   type CosenseClient,
+  updatePageInputSchema,
 } from "./cosense";
 
 const readAnnotations = {
@@ -33,86 +43,11 @@ const destructiveWriteAnnotations = {
 } as const;
 const serverDescription = [
   'Cosense project "shiyui" を読み書きするMCP。',
-  "ページの作成・追記・更新を行う前には、get_page で「cosenseの書き方」を読み、",
-  "そこに記載されたプロジェクト固有の書き方・記法・編集方針に従う。",
-  "通常の読み取りだけの場合は読む必要はない。",
+  "文章を新しく作る、または文章表現を大きく変える場合は、必要に応じて get_page で「cosenseの書き方」を読み、",
+  "そこに記載されたプロジェクト固有の書き方・記法・編集方針に従う。機械的な変更や通常の読み取りだけの場合は読む必要はない。",
 ].join("\n");
 const serverInstructions =
-  "Before calling a write tool, obtain explicit user approval for the exact target and content change: title and text, final body and/or new title, or fromTitle and toTitle. Follow each tool description for operation-specific replacement and retry rules.";
-const MAX_INPUT_LENGTH = 500;
-const MAX_WRITE_TEXT_LENGTH = 10_000;
-const MAX_WRITE_LINES = 100;
-
-const titleSchema = z
-  .string()
-  .trim()
-  .min(1)
-  .max(MAX_INPUT_LENGTH)
-  .refine((title) => title !== "." && title !== "..", {
-    message: "Dot-segment titles are not supported",
-  });
-const writeTitleSchema = titleSchema.refine(
-  (title) => !/[\r\n\u0000]/.test(title),
-  { message: "Write titles must not contain CR, LF, or NUL" },
-);
-const querySchema = z.string().trim().min(1).max(MAX_INPUT_LENGTH);
-const limitSchema = z.number().int().min(1).max(20).default(10);
-const matchSchema = z.enum(["and", "or"]).default("and");
-const pageIdSchema = z
-  .string()
-  .trim()
-  .min(1)
-  .max(MAX_INPUT_LENGTH)
-  .refine((pageId) => pageId !== "." && pageId !== "..", {
-    message: "Dot-segment page IDs are not supported",
-  });
-const commitIdSchema = z.string().trim().min(1).max(MAX_INPUT_LENGTH);
-const writeTextSchema = z
-  .string()
-  .max(MAX_WRITE_TEXT_LENGTH)
-  .refine((text) => text.trim().length > 0, {
-    message: "Text must not be blank",
-  })
-  .refine((text) => !text.includes("\u0000"), {
-    message: "Text must not contain NUL",
-  })
-  .refine((text) => text.split(/\r?\n/).length <= MAX_WRITE_LINES, {
-    message: `Text must contain at most ${MAX_WRITE_LINES} lines`,
-  });
-const updateBodySchema = z
-  .string()
-  .max(MAX_WRITE_TEXT_LENGTH)
-  .refine((body) => !body.includes("\u0000"), {
-    message: "Body must not contain NUL",
-  })
-  .refine((body) => body.split(/\r?\n/).length <= MAX_WRITE_LINES, {
-    message: `Body must contain at most ${MAX_WRITE_LINES} lines`,
-  });
-const updatePageInputSchema = z
-  .object({
-    title: writeTitleSchema,
-    expectedCommitId: commitIdSchema,
-    body: updateBodySchema.optional(),
-    newTitle: writeTitleSchema.optional(),
-  })
-  .strict()
-  .refine(
-    ({ body, newTitle }) => body !== undefined || newTitle !== undefined,
-    { message: "Provide body, newTitle, or both" },
-  );
-const normalizedTitle = (title: string): string =>
-  title.toLowerCase().replaceAll(" ", "_");
-const replaceLinksInputSchema = z
-  .object({
-    fromTitle: writeTitleSchema,
-    toTitle: writeTitleSchema,
-  })
-  .strict()
-  .refine(
-    ({ fromTitle, toTitle }) =>
-      normalizedTitle(fromTitle) !== normalizedTitle(toTitle),
-    { message: "Source and destination titles must be different" },
-  );
+  "Use write tools when the user has clearly requested a write and identified its target. You may compose or polish the final wording within that request; ask only when the intent is ambiguous or the change would exceed the request. Read current page state only when an operation needs it. A clearly requested rename and link replacement may be executed in sequence. Follow each tool description for conflict and retry rules.";
 
 const getPageOutputSchema = z.object({
   exists: z.boolean(),
@@ -276,16 +211,16 @@ function failure(error: unknown): CallToolResult {
       case "page-renamed":
       case "page-replaced":
         message =
-          "The target Cosense page is no longer the page that was approved. Read it again before writing.";
+          "The target Cosense page is no longer the page intended by this write. Read it again before writing.";
         break;
       case "duplicate-title":
         message =
-          "A Cosense page with this title was created concurrently. Read it and ask whether to append or use another title.";
+          "A Cosense page with this title was created concurrently. Read it before deciding whether to append or use another title.";
         break;
       case "stale-commit":
       case "not-fast-forward":
         message =
-          "The Cosense page state changed after it was read. Read the current page and confirm the write again.";
+          "The Cosense page state changed after it was read. Read the current page and reassess the write.";
         break;
     }
   } else if (error instanceof CosenseWriteOutcomeUnknownError) {
@@ -293,7 +228,7 @@ function failure(error: unknown): CallToolResult {
       "Cosense may have committed the write, but the result could not be confirmed. Do not retry; call get_page first.";
   } else if (error instanceof CosenseReplaceLinksRetryableError) {
     message =
-      "The Cosense link replacement result could not be confirmed. Do not retry automatically; after user confirmation, the exact same replace_links arguments are safe to retry.";
+      "The Cosense link replacement result could not be confirmed. Do not retry automatically; after assessing partial completion, the exact same replace_links arguments are safe to retry.";
   } else if (error instanceof CosenseResponseError) {
     message = "Cosense returned an unexpected response.";
   } else if (error instanceof CosenseUpstreamError) {
@@ -346,7 +281,7 @@ export function createCosenseMcpServer(
       title: "Get Cosense page",
       description:
         "Read one page from the fixed Cosense project. Returns the page body without author data or line IDs.",
-      inputSchema: z.object({ title: titleSchema }),
+      inputSchema: getPageInputSchema,
       outputSchema: getPageOutputSchema,
       annotations: readAnnotations,
     },
@@ -371,12 +306,7 @@ export function createCosenseMcpServer(
       title: "Search Cosense text",
       description:
         "Find indexed candidate snippets by words in ordinary page text. Results may lag edits and are not complete page bodies; call get_page for the selected title to read the current body.",
-      inputSchema: z.object({
-        query: querySchema,
-        match: matchSchema,
-        sort: z.enum(["pageRank", "updated"]).default("pageRank"),
-        limit: limitSchema,
-      }),
+      inputSchema: searchFullTextInputSchema,
       outputSchema: fullTextSearchOutputSchema,
       annotations: readAnnotations,
     },
@@ -396,10 +326,7 @@ export function createCosenseMcpServer(
       title: "Search Cosense semantically",
       description:
         "Find indexed semantic candidates from Cosense page titles and inline link notation. Ordinary body text is not searched, results may lag edits, and scores are relative; call get_page for a selected existing title.",
-      inputSchema: z.object({
-        query: querySchema,
-        limit: limitSchema,
-      }),
+      inputSchema: searchVectorInputSchema,
       outputSchema: vectorSearchOutputSchema,
       annotations: readAnnotations,
     },
@@ -419,14 +346,7 @@ export function createCosenseMcpServer(
       title: "Get related Cosense pages",
       description:
         "List 1-hop or 2-hop candidate pages from the fixed Cosense project. Returns metadata and pagination, not current page bodies; call get_page for selected titles.",
-      inputSchema: z.object({
-        title: titleSchema,
-        hop: z.union([z.literal(1), z.literal(2)]).default(1),
-        query: querySchema.optional(),
-        match: matchSchema,
-        limit: limitSchema,
-        cursor: z.string().min(1).max(MAX_INPUT_LENGTH).optional(),
-      }),
+      inputSchema: getRelatedPagesInputSchema,
       outputSchema: relatedPagesOutputSchema,
       annotations: readAnnotations,
     },
@@ -456,18 +376,7 @@ export function createCosenseMcpServer(
       title: "List Cosense pages",
       description:
         "List one bounded page of metadata from the fixed Cosense project, without fetching page bodies. Cosense always places pinned pages first, so sort does not define a pure global order. reportedCount is Cosense's reported total page count, not a per-call limit. Use get_page to read a selected page. Additional pages are fetched only when called again with nextSkip as skip.",
-      inputSchema: z.object({
-        sort: z
-          .enum(["updated", "created", "accessed", "linked", "views", "title"])
-          .default("updated"),
-        limit: limitSchema,
-        skip: z
-          .number()
-          .int()
-          .nonnegative()
-          .max(Number.MAX_SAFE_INTEGER)
-          .default(0),
-      }),
+      inputSchema: listPagesInputSchema,
       outputSchema: listPagesOutputSchema,
       annotations: readAnnotations,
     },
@@ -486,11 +395,8 @@ export function createCosenseMcpServer(
     {
       title: "Get Cosense page changes",
       description:
-        "Use only when the user asks about edit history, how a page changed, or differences since an earlier commitId; do not call for routine page reads. Return at most the latest 50 explainable changes for one page in the fixed Cosense project. Pass pageId and optionally commitId from get_page to return only later changes. Actor names are resolved with one project-users request; no other pages or histories are fetched.",
-      inputSchema: z.object({
-        pageId: pageIdSchema,
-        commitId: commitIdSchema.optional(),
-      }),
+        "Use only when the user asks about edit history, how a page changed, or differences since an earlier commitId; do not call for routine page reads. Return at most the latest 100 explainable changes for one page in the fixed Cosense project, with before and after text limited to 2,000 characters each. Pass pageId and optionally commitId from get_page to return only later changes. Actor names are resolved with one project-users request; no other pages or histories are fetched.",
+      inputSchema: getPageChangesInputSchema,
       outputSchema: pageChangesOutputSchema,
       annotations: readAnnotations,
     },
@@ -520,13 +426,8 @@ export function createCosenseMcpServer(
     {
       title: "Create Cosense page",
       description:
-        "Create one page in the fixed Cosense project. Call only after the user has approved the exact title and text. Fails if the page already exists and never falls back to append or overwrite. The client checks absence, previews the exact page, and submits once without retrying. If the outcome is uncertain, call get_page before any further write.",
-      inputSchema: z
-        .object({
-          title: writeTitleSchema,
-          text: writeTextSchema,
-        })
-        .strict(),
+        "Create one page in the fixed Cosense project when the user's request clearly identifies the page and intent. The final wording may be composed within that request. Fails if the page already exists and never falls back to append or overwrite. The client checks absence, previews the exact page, and submits once without retrying. If the outcome is uncertain, call get_page before any further write.",
+      inputSchema: createPageInputSchema,
       outputSchema: writePageOutputSchema,
       annotations: writeAnnotations,
     },
@@ -548,14 +449,8 @@ export function createCosenseMcpServer(
     {
       title: "Append to Cosense page",
       description:
-        "Append exact text to the end of one existing page in the fixed Cosense project. First call get_page, then pass its current commitId as expectedCommitId, and call only after the user has approved the exact title and text. Fails if the page is missing, renamed, or changed; it never creates, replaces, or deletes content. The client previews and submits once without retrying. If the outcome is uncertain, call get_page before any further write.",
-      inputSchema: z
-        .object({
-          title: writeTitleSchema,
-          text: writeTextSchema,
-          expectedCommitId: commitIdSchema,
-        })
-        .strict(),
+        "Append non-blank text to the end of one existing page in the fixed Cosense project when the user's write intent and target are clear. Pass the current commitId from get_page as expectedCommitId; reuse an already current result instead of reading only for confirmation. Fails if the page is missing, renamed, or changed; it never creates, replaces, or deletes content. The client previews and submits once without retrying. If the outcome is uncertain, call get_page before any further write.",
+      inputSchema: appendToPageInputSchema,
       outputSchema: writePageOutputSchema,
       annotations: writeAnnotations,
     },
@@ -577,7 +472,7 @@ export function createCosenseMcpServer(
     {
       title: "Update Cosense page",
       description:
-        "Update one existing page in the fixed Cosense project, including replacing its body, changing its title, or both. First call get_page and pass its current commitId as expectedCommitId. body is the complete final page body excluding the title: omit it to keep the body, or pass an empty string to delete the body. When body is provided, every existing body line omitted from it is deleted. Call only after the user has approved the exact supplied final body and/or new title. The client previews and submits once without retrying. After a title change, ask separately before calling replace_links; update_page does not rewrite links.",
+        "Update one existing page in the fixed Cosense project, including replacing its body, changing its title, or both, when the user's write intent and target are clear. Pass the current commitId from get_page as expectedCommitId. body is the complete final page body excluding the title: omit it to keep the body, or pass an empty string to delete the body. When body is provided, every existing body line omitted from it is deleted. The client previews and submits once without retrying. update_page does not rewrite links; when the same user request clearly includes both rename and link replacement, call replace_links afterward with the actual submitted title.",
       inputSchema: updatePageInputSchema,
       outputSchema: updatePageOutputSchema,
       annotations: destructiveWriteAnnotations,
@@ -602,7 +497,7 @@ export function createCosenseMcpServer(
     {
       title: "Replace Cosense links",
       description:
-        "Replace links project-wide in the fixed Cosense project from one exact title to another. This directly replaces [title], #title, and [title.icon] references without preview and does not rename any page. Use get_page to inspect relevant pages when needed, and call only after the user has approved the exact fromTitle and toTitle. Do not call automatically after update_page; ask separately after a rename.",
+        "Replace links project-wide in the fixed Cosense project from one exact title to another. This directly replaces [title], #title, and [title.icon] references without preview and does not rename any page. Use get_page only when inspection is needed. Call when the user's request clearly includes this project-wide replacement, including as the next step of a requested rename; do not infer link replacement from a rename that did not request it.",
       inputSchema: replaceLinksInputSchema,
       outputSchema: replaceLinksOutputSchema,
       annotations: destructiveWriteAnnotations,

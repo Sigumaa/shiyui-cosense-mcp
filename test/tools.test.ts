@@ -173,12 +173,19 @@ describe("createCosenseMcpServer", () => {
       version: "0.2.0",
       description: [
         'Cosense project "shiyui" を読み書きするMCP。',
-        "ページの作成・追記・更新を行う前には、get_page で「cosenseの書き方」を読み、",
-        "そこに記載されたプロジェクト固有の書き方・記法・編集方針に従う。",
-        "通常の読み取りだけの場合は読む必要はない。",
+        "文章を新しく作る、または文章表現を大きく変える場合は、必要に応じて get_page で「cosenseの書き方」を読み、",
+        "そこに記載されたプロジェクト固有の書き方・記法・編集方針に従う。機械的な変更や通常の読み取りだけの場合は読む必要はない。",
       ].join("\n"),
     });
-    expect(result.instructions).toContain("explicit user approval");
+    expect(result.instructions).toContain("clearly requested a write");
+    expect(result.instructions).toContain(
+      "compose or polish the final wording",
+    );
+    expect(result.instructions).toContain(
+      "A clearly requested rename and link replacement may be executed in sequence",
+    );
+    expect(result.instructions).not.toContain("exact content");
+    expect(result.instructions).not.toContain("confirmation");
     expect(result.instructions).not.toContain("raw Cosense syntax");
     expect(result.instructions.length).toBeLessThan(500);
   });
@@ -234,8 +241,16 @@ describe("createCosenseMcpServer", () => {
       result.tools.find(({ name }) => name === "get_page_changes")?.description,
     ).toContain("do not call for routine page reads");
     expect(
+      result.tools.find(({ name }) => name === "get_page_changes")?.description,
+    ).toContain("latest 100 explainable changes");
+    expect(
       result.tools.find(({ name }) => name === "update_page")?.description,
     ).toContain("every existing body line omitted from it is deleted");
+    expect(
+      result.tools.find(({ name }) => name === "update_page")?.description,
+    ).toContain(
+      "when the same user request clearly includes both rename and link replacement",
+    );
 
     const expectedProperties = {
       get_page: ["title"],
@@ -378,7 +393,7 @@ describe("createCosenseMcpServer", () => {
     }
   });
 
-  it("creates a page only with the exact bounded title and text", async () => {
+  it("creates a page with the requested title and text", async () => {
     const client = createStubClient();
     const response = await modernRequest(createHandler(client), "tools/call", {
       name: "create_page",
@@ -403,7 +418,7 @@ describe("createCosenseMcpServer", () => {
     );
   });
 
-  it("appends only against the approved commit", async () => {
+  it("appends only against the expected current commit", async () => {
     const client = createStubClient();
     const response = await modernRequest(createHandler(client), "tools/call", {
       name: "append_to_page",
@@ -437,7 +452,7 @@ describe("createCosenseMcpServer", () => {
     );
   });
 
-  it("updates to an approved complete body and title against one commit", async () => {
+  it("updates to a complete body and title against one commit", async () => {
     const client = createStubClient();
     const response = await modernRequest(createHandler(client), "tools/call", {
       name: "update_page",
@@ -481,7 +496,7 @@ describe("createCosenseMcpServer", () => {
     );
   });
 
-  it("replaces project links only for the exact approved title pair", async () => {
+  it("replaces project links for the requested exact title pair", async () => {
     const client = createStubClient();
     const response = await modernRequest(createHandler(client), "tools/call", {
       name: "replace_links",
@@ -540,15 +555,21 @@ describe("createCosenseMcpServer", () => {
     );
   });
 
-  it("passes list defaults to one bounded client request", async () => {
+  it("passes candidate and list defaults to one bounded request each", async () => {
     const client = createStubClient();
-    const response = await modernRequest(createHandler(client), "tools/call", {
+    const handler = createHandler(client);
+    const searchResponse = await modernRequest(handler, "tools/call", {
+      name: "search_vector",
+      arguments: { query: "山形" },
+    });
+    const listResponse = await modernRequest(handler, "tools/call", {
       name: "list_pages",
       arguments: {},
     });
 
-    expect(response.error).toBeUndefined();
-    expect(response.result).toMatchObject({
+    expect(searchResponse.error).toBeUndefined();
+    expect(listResponse.error).toBeUndefined();
+    expect(listResponse.result).toMatchObject({
       resultType: "complete",
       content: [{ type: "text", text: "Listed 0 Cosense pages." }],
       structuredContent: {
@@ -559,9 +580,39 @@ describe("createCosenseMcpServer", () => {
         results: [],
       },
     });
+    expect(client.searchVector).toHaveBeenCalledOnce();
+    expect(client.searchVector).toHaveBeenCalledWith(
+      { query: "山形", limit: 20 },
+      expect.any(AbortSignal),
+    );
     expect(client.listPages).toHaveBeenCalledOnce();
     expect(client.listPages).toHaveBeenCalledWith(
-      { sort: "updated", limit: 10, skip: 0 },
+      { sort: "updated", limit: 20, skip: 0 },
+      expect.any(AbortSignal),
+    );
+  });
+
+  it("accepts the explicit candidate and list request maxima", async () => {
+    const client = createStubClient();
+    const handler = createHandler(client);
+
+    const searchResponse = await modernRequest(handler, "tools/call", {
+      name: "search_full_text",
+      arguments: { query: "山形", limit: 100 },
+    });
+    const listResponse = await modernRequest(handler, "tools/call", {
+      name: "list_pages",
+      arguments: { limit: 1_000 },
+    });
+
+    expect(searchResponse.error).toBeUndefined();
+    expect(listResponse.error).toBeUndefined();
+    expect(client.searchFullText).toHaveBeenCalledWith(
+      { query: "山形", match: "and", sort: "pageRank", limit: 100 },
+      expect.any(AbortSignal),
+    );
+    expect(client.listPages).toHaveBeenCalledWith(
+      { sort: "updated", limit: 1_000, skip: 0 },
       expect.any(AbortSignal),
     );
   });
@@ -599,12 +650,14 @@ describe("createCosenseMcpServer", () => {
     );
   });
 
-  it("rejects unsafe list and change-history inputs before calling Cosense", async () => {
+  it("rejects unsafe read inputs before calling Cosense", async () => {
     const client = createStubClient();
     const handler = createHandler(client);
 
     for (const [name, arguments_] of [
-      ["list_pages", { limit: 21 }],
+      ["search_full_text", { query: "山形", limit: 101 }],
+      ["get_related_pages", { title: "山形", limit: 101 }],
+      ["list_pages", { limit: 1_001 }],
       ["list_pages", { skip: -1 }],
       ["list_pages", { skip: Number.MAX_SAFE_INTEGER + 1 }],
       ["get_page_changes", { pageId: ".." }],
@@ -617,6 +670,8 @@ describe("createCosenseMcpServer", () => {
       expect(response.result).toMatchObject({ isError: true });
     }
 
+    expect(client.searchFullText).not.toHaveBeenCalled();
+    expect(client.getRelatedPages).not.toHaveBeenCalled();
     expect(client.listPages).not.toHaveBeenCalled();
     expect(client.getPageChanges).not.toHaveBeenCalled();
   });
@@ -637,12 +692,10 @@ describe("createCosenseMcpServer", () => {
     const handler = createHandler(client);
 
     for (const [name, arguments_] of [
-      ["create_page", { title: "山形", text: " " }],
       ["create_page", { title: "..", text: "本文" }],
-      ["create_page", { title: "山形", text: "a".repeat(10_001) }],
-      ["create_page", { title: "山形", text: "line\n".repeat(100) }],
       ["create_page", { title: "山形", text: "before\u0000after" }],
       ["create_page", { title: "山\n形", text: "本文" }],
+      ["create_page", { title: "山\r形", text: "本文" }],
       ["create_page", { title: "山\u0000形", text: "本文" }],
       ["create_page", { title: "山形", text: "本文", project: "other" }],
       [
@@ -650,22 +703,6 @@ describe("createCosenseMcpServer", () => {
         { title: "山形", text: "本文", expectedCommitId: " " },
       ],
       ["update_page", { title: "山形", expectedCommitId: "commit-id" }],
-      [
-        "update_page",
-        {
-          title: "山形",
-          expectedCommitId: "commit-id",
-          body: "a".repeat(10_001),
-        },
-      ],
-      [
-        "update_page",
-        {
-          title: "山形",
-          expectedCommitId: "commit-id",
-          body: "line\n".repeat(100),
-        },
-      ],
       [
         "update_page",
         {
@@ -690,6 +727,88 @@ describe("createCosenseMcpServer", () => {
     expect(client.replaceLinks).not.toHaveBeenCalled();
   });
 
+  it("allows a title-only create and rejects a blank append", async () => {
+    const client = createStubClient();
+    const handler = createHandler(client);
+
+    const createResponse = await modernRequest(handler, "tools/call", {
+      name: "create_page",
+      arguments: { title: "空のページ", text: "" },
+    });
+    const appendResponse = await modernRequest(handler, "tools/call", {
+      name: "append_to_page",
+      arguments: {
+        title: "山形",
+        text: " ",
+        expectedCommitId: "commit-id",
+      },
+    });
+
+    expect(createResponse.error).toBeUndefined();
+    expect(appendResponse.error).toBeUndefined();
+    expect(appendResponse.result).toMatchObject({ isError: true });
+    expect(client.createPage).toHaveBeenCalledWith(
+      { title: "空のページ", text: "" },
+      expect.any(AbortSignal),
+    );
+    expect(client.appendToPage).not.toHaveBeenCalled();
+  });
+
+  it("passes write bodies over 100 lines and 10,000 characters to the client", async () => {
+    const client = createStubClient();
+    const handler = createHandler(client);
+    const body = Array.from(
+      { length: 101 },
+      (_, index) => `${index}:${"a".repeat(100)}`,
+    ).join("\n");
+    expect(body.length).toBeGreaterThan(10_000);
+
+    const createResponse = await modernRequest(handler, "tools/call", {
+      name: "create_page",
+      arguments: { title: "長い新規ページ", text: body },
+    });
+    const appendResponse = await modernRequest(handler, "tools/call", {
+      name: "append_to_page",
+      arguments: {
+        title: "長い追記先",
+        text: body,
+        expectedCommitId: "commit-id",
+      },
+    });
+    const updateResponse = await modernRequest(handler, "tools/call", {
+      name: "update_page",
+      arguments: {
+        title: "長い更新先",
+        body,
+        expectedCommitId: "commit-id",
+      },
+    });
+
+    expect(createResponse.error).toBeUndefined();
+    expect(appendResponse.error).toBeUndefined();
+    expect(updateResponse.error).toBeUndefined();
+    expect(client.createPage).toHaveBeenCalledWith(
+      { title: "長い新規ページ", text: body },
+      expect.any(AbortSignal),
+    );
+    expect(client.appendToPage).toHaveBeenCalledWith(
+      {
+        title: "長い追記先",
+        text: body,
+        expectedCommitId: "commit-id",
+      },
+      expect.any(AbortSignal),
+    );
+    expect(client.updatePage).toHaveBeenCalledWith(
+      {
+        title: "長い更新先",
+        body,
+        expectedCommitId: "commit-id",
+      },
+      expect.any(AbortSignal),
+    );
+  });
+
   it("returns a safe authentication failure without an HTTP status", async () => {
     const client = createStubClient();
     vi.mocked(client.getPage).mockRejectedValue(
@@ -712,7 +831,7 @@ describe("createCosenseMcpServer", () => {
   it.each([
     [
       new CosenseWriteConflictError("stale-commit", "page append"),
-      "The Cosense page state changed after it was read. Read the current page and confirm the write again.",
+      "The Cosense page state changed after it was read. Read the current page and reassess the write.",
     ],
     [
       new CosenseWriteConflictError("page-already-exists", "page create"),
@@ -760,7 +879,7 @@ describe("createCosenseMcpServer", () => {
       content: [
         {
           type: "text",
-          text: "The Cosense link replacement result could not be confirmed. Do not retry automatically; after user confirmation, the exact same replace_links arguments are safe to retry.",
+          text: "The Cosense link replacement result could not be confirmed. Do not retry automatically; after assessing partial completion, the exact same replace_links arguments are safe to retry.",
         },
       ],
     });

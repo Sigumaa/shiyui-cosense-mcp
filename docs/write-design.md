@@ -1,6 +1,6 @@
 # Cosense write設計
 
-確認日: 2026-08-14（JST）
+確認日: 2026-08-15（JST）
 
 ## 対象
 
@@ -83,7 +83,9 @@ bodyは `{ "from": "旧title", "to": "新title" }`。pageタイトル自体は�
 }
 ```
 
-実行前にpageの `pageId` と `commitId` を取得する。`expectedCommitId` と不一致、page不存在、rename時は失敗する。preview後にも同じpageとcommitであることを確認してからsubmitする。別操作へのfallbackは行わない。
+clientはtool call内のpreflight GETでpageの `pageId` と `commitId` を取得する。`expectedCommitId` と不一致、page不存在、rename時は失敗する。preview後にも同じpageとcommitであることを確認してからsubmitする。別操作へのfallbackは行わない。
+
+`text` は空白以外を含むことを必須とし、意図しない空行だけの書き込みを防ぐ。
 
 ### `update_page`
 
@@ -110,7 +112,7 @@ bodyは `{ "from": "旧title", "to": "新title" }`。pageタイトル自体は�
 { "fromTitle": "山形", "toTitle": "山形旅行" }
 ```
 
-固定projectへの1 POSTでlinkを一括置換する。previewはなく、複数pageへ影響するため、単一page更新とは別tool・別承認にする。タイトル変更後も自動実行せず、`update_page` のsubmit responseが返した実titleを `toTitle` に使う。
+固定projectへの1 POSTでlinkを一括置換する。previewはなく、複数pageへ影響するため、単一page更新とは別toolにする。タイトル変更だけの依頼からlink置換を推測しない。ユーザーがrenameとlink更新をまとめて明確に依頼している場合は追加確認を要求せず、`update_page` のsubmit responseが返した実titleを `toTitle` に使って続けて実行できる。
 
 競合せず成功するpage editは `GET → preview → GET → submit` の最大4 requestとする。変更なしのupdateは1 GET、`replace_links` は1 POSTである。競合時は途中で停止する。preview / submitは各1回だけ実行し、preview ID、page ID、line IDをMCP出力へ返さない。
 
@@ -151,15 +153,15 @@ update / replace links:
 }
 ```
 
-作成と追記は既存dataを削除・上書きしないため `destructiveHint` はfalseとする。updateは既存本文の置換・削除、replace linksは複数pageの変更を含むためtrueとする。updateは完成形とcommit条件を指定し、replace linksは同じtitleの組を再実行しても置換済みpageへ追加作用しないため `idempotentHint` はtrueとする。すべて外部Cosenseへ書き込むため `openWorldHint` はtrueである。annotationsはclient向けのhintであり、認証、入力検証、ユーザー承認の代替にはしない。[OpenAI tool annotations](https://developers.openai.com/plugins/reference#annotations)
+作成と追記は既存dataを削除・上書きしないため `destructiveHint` はfalseとする。updateは既存本文の置換・削除、replace linksは複数pageの変更を含むためtrueとする。updateは完成形とcommit条件を指定し、replace linksは同じtitleの組を再実行しても置換済みpageへ追加作用しないため `idempotentHint` はtrueとする。すべて外部Cosenseへ書き込むため `openWorldHint` はtrueである。annotationsはclient向けのhintであり、認証、入力検証、ユーザーの書き込み意思の代替にはしない。[OpenAI tool annotations](https://developers.openai.com/plugins/reference#annotations)
 
-`confirmed: true` のような入力は人間の承認を証明しないため設けない。tool descriptionで対象と正確な変更内容の承認後だけ呼ぶよう指示し、ChatGPT側のwrite確認とCloudflare Accessを利用する。
+`confirmed: true` のような入力は設けない。ユーザーの書き込み意思と対象が明確なら、依頼の範囲内でLLMが最終文面を整えて実行できる。最終文字列の再提示と再承認は要求せず、意図が曖昧な場合や依頼範囲を超える場合だけ確認する。Cloudflare Accessによる利用者の認証は別に維持する。
 
 ## Cosense記法とproject内の慣習
 
-公式CLIは単体commandだけでなく、編集前に対象pageを読み、project内の見出し・indent・空行・icon・linkのstyleへ合わせるAgent Skillも提供する。このMCPではproject固有の書き方・記法・編集方針をCosenseの [`cosenseの書き方`](https://scrapbox.io/shiyui/cosense%E3%81%AE%E6%9B%B8%E3%81%8D%E6%96%B9) に置き、正本とする。
+公式CLIは単体commandだけでなく、対象pageを読み、project内の見出し・indent・空行・icon・linkのstyleへ合わせるAgent Skillも提供する。このMCPではproject固有の書き方・記法・編集方針をCosenseの [`cosenseの書き方`](https://scrapbox.io/shiyui/cosense%E3%81%AE%E6%9B%B8%E3%81%8D%E6%96%B9) に置き、正本とする。
 
-MCPのserver descriptionには、pageの作成・追記・更新前に `get_page` で正本を読むことと、通常のreadでは不要であることだけを記載する。ルール本体はコードやREADMEへ複製しない。承認対象、本文全置換、project-wide link置換、retry条件は各tool descriptionとclient実装で別に担保する。
+現在のcommit、page状態、既存の書式を判断するために必要な場合だけ `get_page` を使う。append / updateに渡すcurrentな `expectedCommitId` の取得、競合や結果不明後の状態確認にはreadが必要だが、既知の結果がcurrentなら確認だけの再readは要求しない。ルール本体はコードやREADMEへ複製しない。本文全置換、project-wide link置換、retry条件は各tool descriptionとclient実装で別に担保する。
 
 - [公式CLI Agent Skill: edit-page](https://github.com/helpfeel/cosense-cli/blob/v1.11.0/skills/cosense/edit-page.md)
 - [Cosense Help: ブラケティング](https://scrapbox.io/help-jp/%E3%83%96%E3%83%A9%E3%82%B1%E3%83%86%E3%82%A3%E3%83%B3%E3%82%B0)
@@ -167,28 +169,41 @@ MCPのserver descriptionには、pageの作成・追記・更新前に `get_page
 ## 入力と通信境界
 
 - title: trim後1–500文字、`.` / `..`、CR / LF / NULを拒否
-- text: 空白だけ、NULを拒否。最大10,000 UTF-16 code units、100行
-- body: NULを拒否。空文字を許可し、最大10,000 UTF-16 code units、100行
-- expectedCommitId: trim後1–500文字
+- query / pageId / commitId: 前後空白を除いた値を使い、空白だけの値を拒否し、最大500文字
+- cursor: 空白だけの値を拒否し、最大500文字
+- text / body: NULを拒否。appendの空白だけのtextは拒否する。MCP独自の文字数・行数・生成change数上限は設けない
+- 500文字上限はWorkerの16 KiB URL境界を守るための通信上の制約であり、本文量を制限するものではない
 - 新規line ID: Web Cryptoで生成する12 byte、24桁hex
 - request timeout: 15秒
 - `cache: "no-store"`
 - `redirect: "manual"`。3xxを追跡しない
 - PAT、upstream error body、preview IDをresultとlogへ含めない
+- `replace_links` のupstream messageは成功判定後に2000文字へ短縮する
 - 自動retry、polling、background処理、Cosense本文の永続化を行わない
+
+## 制約の分類
+
+| 分類                      | 対象                                                                                                                                            | 判断                                                                                                         |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| Cosense / API仕様         | preview / submit、preview IDの失効とconsume、409、replace linksにpreviewがないこと                                                              | APIの手順とerror semanticsとして維持                                                                         |
+| 通信・アクセス制御        | title、query、pageId、commitId、cursorの500文字上限、15秒timeout、redirect no-follow、PAT / Access認証                                          | Workerの16 KiB URL境界、credential境界、意図しない転送を防ぐため維持                                         |
+| データ整合性              | 不正title・NUL・空白だけのappend拒否、同名page確認、`expectedCommitId`、preview完成形検証、submit直前の再GET、結果不明時の非retry               | 不正な行、無意味な追記、誤上書き、競合、二重実行を防ぐため維持                                               |
+| request暴走防止           | 1 callのrequest数固定、自動pagination / polling / background処理なし、429と一時errorの非攻撃的な扱い                                            | 維持。候補系は1–100、一覧は1–1000を明示指定し、追加取得は次のtool callで行う                                 |
+| MCP独自のcontext境界      | 履歴100件・前後各2000文字、snippet 5行・1200文字、description 5件・各240文字、matched words 20件、actor 200文字、replace links message 2000文字 | 最大100～1000候補を返すcallでもLLM contextが過度に膨らまないよう、本文取得を妨げない候補・履歴表示だけに維持 |
+| MCP独自の保守的制約・調整 | 本文の文字数・行数・change数、最終文字列の再承認、一律read、rename後の別確認                                                                    | 撤廃。明確な依頼の範囲内で整文と連続実行を認め、技術的に状態取得が必要な場合だけreadまたは確認を要求する     |
 
 ## 公式CLIとの差分
 
-| 項目       | 公式CLI                                                    | このMCP                                  |
-| ---------- | ---------------------------------------------------------- | ---------------------------------------- |
-| project    | project URLを引数で指定                                    | `shiyui` 固定                            |
-| credential | PATまたはService Account                                   | PATのみ                                  |
-| 公開操作   | create / insert / replace / delete / rename / replaceLinks | create / append / update / replace links |
-| 編集指定   | line IDを含むoperation                                     | appendまたはpage本文の完成形             |
-| preview ID | command間で利用者が渡す                                    | tool内部だけで利用                       |
-| 競合前提   | Agent Skillの手順で再read                                  | commitIdを必須にしclientでも2回検査      |
-| 入力上限   | 主にCosense側validation                                    | 文字数・行数・生成change数をMCPでも制限  |
-| redirect   | JSON requestはfetch既定                                    | manual no-follow                         |
-| response   | plain text中心                                             | Zod検証したstructured content            |
+| 項目       | 公式CLI                                                    | このMCP                                                  |
+| ---------- | ---------------------------------------------------------- | -------------------------------------------------------- |
+| project    | project URLを引数で指定                                    | `shiyui` 固定                                            |
+| credential | PATまたはService Account                                   | PATのみ                                                  |
+| 公開操作   | create / insert / replace / delete / rename / replaceLinks | create / append / update / replace links                 |
+| 編集指定   | line IDを含むoperation                                     | appendまたはpage本文の完成形                             |
+| preview ID | command間で利用者が渡す                                    | tool内部だけで利用                                       |
+| 競合前提   | Agent Skillの手順で再read                                  | commitIdを必須にしclientでも2回検査                      |
+| 入力上限   | 主にCosense側validation                                    | 本文・行数・change数の独自上限なし。URL構成要素は500文字 |
+| redirect   | JSON requestはfetch既定                                    | manual no-follow                                         |
+| response   | plain text中心                                             | Zod検証したstructured content                            |
 
 公式CLIのraw operation、preview ID受け渡し、任意projectは公開しない。MCPでは会話上の目的に合わせた4 toolへまとめ、タイトル変更とproject-wide link置換は非atomicな別操作として分離する。

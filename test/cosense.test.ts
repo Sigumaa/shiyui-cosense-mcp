@@ -252,7 +252,7 @@ describe("getPage", () => {
     const result = await createCosenseClient(
       TEST_PERSONAL_ACCESS_TOKEN,
       fetcher,
-    ).getPage({ title: "日本語 /%?#" });
+    ).getPage({ title: " 日本語 /%?# " });
 
     expect(calls).toHaveLength(1);
     expect(calls[0]?.url).toBe(
@@ -528,7 +528,7 @@ describe("request errors", () => {
     timeoutSpy.mockRestore();
   });
 
-  it("rejects oversized direct-client input before fetching", async () => {
+  it("rejects oversized URL components and candidate limits before fetching", async () => {
     const fetcher: typeof fetch = vi.fn();
     const client = createCosenseClient(TEST_PERSONAL_ACCESS_TOKEN, fetcher);
     const oversized = "日".repeat(501);
@@ -538,6 +538,18 @@ describe("request errors", () => {
     await expect(client.searchVector({ query: oversized })).rejects.toThrow();
     await expect(
       client.getRelatedPages({ title: "page", hop: 2, cursor: oversized }),
+    ).rejects.toThrow();
+    await expect(
+      client.getRelatedPages({ title: "page", hop: 2, cursor: " \n " }),
+    ).rejects.toThrow("Must not be blank");
+    await expect(
+      client.searchFullText({ query: "query", limit: 101 }),
+    ).rejects.toThrow();
+    await expect(
+      client.searchVector({ query: "query", limit: 101 }),
+    ).rejects.toThrow();
+    await expect(
+      client.getRelatedPages({ title: "page", hop: 2, limit: 101 }),
     ).rejects.toThrow();
 
     expect(fetcher).not.toHaveBeenCalled();
@@ -611,10 +623,15 @@ describe("searchFullText", () => {
     });
   });
 
-  it("omits op for AND matching and uses the default sort", async () => {
-    const { fetcher, calls } = createFixtureFetch({ body: { pages: [] } });
+  it("omits op for AND matching and uses the default sort and limit", async () => {
+    const pages = Array.from({ length: 21 }, (_, index) => ({
+      title: `page-${index}`,
+      lines: [],
+      words: [],
+    }));
+    const { fetcher, calls } = createFixtureFetch({ body: { pages } });
 
-    await createCosenseClient(
+    const result = await createCosenseClient(
       TEST_PERSONAL_ACCESS_TOKEN,
       fetcher,
     ).searchFullText({ query: "alpha beta" });
@@ -623,6 +640,36 @@ describe("searchFullText", () => {
       "https://scrapbox.io/api/pages/shiyui/search/query?q=alpha+beta&sort=pageRank",
     );
     expect(calls[0]?.url).not.toContain("op=");
+    expect(result).toMatchObject({ returned: 20, truncated: true });
+  });
+
+  it("bounds candidate context without fetching page bodies", async () => {
+    const { fetcher, calls } = createFixtureFetch({
+      body: {
+        pages: [
+          {
+            title: "long candidate",
+            lines: Array.from({ length: 6 }, () => "x".repeat(300)),
+            words: Array.from({ length: 21 }, (_, index) => `word-${index}`),
+          },
+          {
+            title: "many lines",
+            lines: ["one", "two", "three", "four", "five", "six"],
+            words: [],
+          },
+        ],
+      },
+    });
+
+    const result = await createCosenseClient(
+      TEST_PERSONAL_ACCESS_TOKEN,
+      fetcher,
+    ).searchFullText({ query: "candidate" });
+
+    expect(calls).toHaveLength(1);
+    expect(result.results[0]?.snippet).toHaveLength(1_200);
+    expect(result.results[0]?.matchedWords).toHaveLength(20);
+    expect(result.results[1]?.snippet).toBe("one\ntwo\nthree\nfour\nfive");
   });
 });
 
@@ -789,8 +836,8 @@ describe("getRelatedPages", () => {
     });
   });
 
-  it("uses input-title normalization and empty links when the base page is 404", async () => {
-    const { fetcher } = createFixtureFetch(
+  it("uses input-title normalization, the default limit, and empty links when the base page is 404", async () => {
+    const { fetcher, calls } = createFixtureFetch(
       { status: 404, body: { secret: "not read" } },
       {
         body: {
@@ -811,6 +858,9 @@ describe("getRelatedPages", () => {
       fetcher,
     ).getRelatedPages({ title: "Base Page", hop: 1 });
 
+    expect(calls[1]?.url).toBe(
+      "https://scrapbox.io/api/pages/v2/shiyui/Base%20Page/links1hop?perPage=20",
+    );
     expect(result.results[0]?.relation).toBe("incoming");
   });
 
@@ -973,8 +1023,15 @@ describe("getRelatedPages", () => {
     await createCosenseClient(
       TEST_PERSONAL_ACCESS_TOKEN,
       fetcher,
-    ).getRelatedPages({ title: value, hop: 2, query: value, cursor: value });
+    ).getRelatedPages({
+      title: value,
+      hop: 2,
+      query: value,
+      limit: 100,
+      cursor: value,
+    });
 
+    expect(calls[0]?.url).toContain("perPage=100");
     expect(new TextEncoder().encode(calls[0]?.url).byteLength).toBeLessThan(
       16 * 1_024,
     );
@@ -998,6 +1055,29 @@ describe("getRelatedPages", () => {
 });
 
 describe("listPages", () => {
+  it("uses a default limit of 20 and accepts the explicit maximum of 1000", async () => {
+    const emptyList = (limit: number) => ({
+      projectName: "shiyui",
+      count: 0,
+      limit,
+      skip: 0,
+      pages: [],
+    });
+    const { fetcher, calls } = createFixtureFetch(
+      { body: emptyList(20) },
+      { body: emptyList(1_000) },
+    );
+    const client = createCosenseClient(TEST_PERSONAL_ACCESS_TOKEN, fetcher);
+
+    await client.listPages({});
+    await client.listPages({ limit: 1_000 });
+
+    expect(calls.map(({ url }) => url)).toEqual([
+      "https://scrapbox.io/api/pages/shiyui/?sort=updated&limit=20&skip=0",
+      "https://scrapbox.io/api/pages/shiyui/?sort=updated&limit=1000&skip=0",
+    ]);
+  });
+
   it("returns compact metadata with explicit offset pagination in one request", async () => {
     const { fetcher, calls } = createFixtureFetch({
       body: {
@@ -1070,11 +1150,11 @@ describe("listPages", () => {
     expect(JSON.stringify(result)).not.toContain("must-not-leak");
   });
 
-  it("rejects unbounded list inputs before fetching", async () => {
+  it("rejects list inputs above 1000 and negative offsets before fetching", async () => {
     const { fetcher, calls } = createFixtureFetch();
     const client = createCosenseClient(TEST_PERSONAL_ACCESS_TOKEN, fetcher);
 
-    await expect(client.listPages({ limit: 21 })).rejects.toThrow();
+    await expect(client.listPages({ limit: 1_001 })).rejects.toThrow();
     await expect(client.listPages({ skip: -1 })).rejects.toThrow();
     expect(calls).toHaveLength(0);
   });
@@ -1151,8 +1231,8 @@ describe("getPageChanges", () => {
       TEST_PERSONAL_ACCESS_TOKEN,
       fetcher,
     ).getPageChanges({
-      pageId: "page /%?#",
-      commitId: "head /%?#",
+      pageId: " page /%?# ",
+      commitId: " head /%?# ",
     });
 
     expect(calls).toHaveLength(2);
@@ -1214,9 +1294,9 @@ describe("getPageChanges", () => {
   });
 
   it("bounds returned events and change text without additional requests", async () => {
-    const changes = Array.from({ length: 51 }, (_, index) => ({
+    const changes = Array.from({ length: 101 }, (_, index) => ({
       _insert: `line-${index}`,
-      lines: { id: `line-${index}`, text: `${index}:${"x".repeat(600)}` },
+      lines: { id: `line-${index}`, text: `${index}:${"x".repeat(2_100)}` },
     }));
     const { fetcher, calls } = createFixtureFetch(
       { body: { commits: [{ id: "latest", changes }] } },
@@ -1235,14 +1315,14 @@ describe("getPageChanges", () => {
     ]);
     expect(result).toMatchObject({
       commitCount: 1,
-      totalChanges: 51,
-      returned: 50,
+      totalChanges: 101,
+      returned: 100,
       truncated: true,
       latestCommitId: "latest",
     });
     expect(result).not.toHaveProperty("afterCommitId");
     expect(result.changes[0]?.after?.startsWith("1:")).toBe(true);
-    expect(result.changes[0]?.after).toHaveLength(500);
+    expect(result.changes[0]?.after).toHaveLength(2_000);
   });
 
   it("rejects invalid page and commit IDs before fetching", async () => {
@@ -1333,6 +1413,42 @@ describe("createPage", () => {
         "https://scrapbox.io/shiyui/%E5%B1%B1%E5%BD%A2%20%2F%25%3F%23",
       commitId: "commit-after",
       addedLines: 3,
+    });
+  });
+
+  it("creates a title-only page from blank text", async () => {
+    const title = "title only";
+    const { fetcher, calls } = createWriteFixtureFetch(
+      { method: "GET", body: missingPage(title) },
+      {
+        method: "POST",
+        body: (call: FetchCall) => {
+          const changes = requestBody(call).changes as {
+            _insert: string;
+            lines: { id: string; text: string };
+          }[];
+          expect(changes).toHaveLength(1);
+          expect(changes[0]?.lines.text).toBe(title);
+          return previewFromRequest(call, { title, persistent: false });
+        },
+      },
+      { method: "GET", body: missingPage(title) },
+      {
+        method: "POST",
+        body: { commitId: "commit-after", page: { title } },
+      },
+    );
+
+    const result = await createCosenseClient(
+      TEST_PERSONAL_ACCESS_TOKEN,
+      fetcher,
+    ).createPage({ title, text: "" });
+
+    expect(calls).toHaveLength(4);
+    expect(result).toMatchObject({
+      action: "create",
+      title,
+      addedLines: 1,
     });
   });
 
@@ -1477,6 +1593,61 @@ describe("appendToPage", () => {
       commitId: "commit-after",
       previousCommitId: "commit-before",
       addedLines: 3,
+    });
+  });
+
+  it("rejects blank append text without making a request", async () => {
+    const fetcher: typeof fetch = vi.fn();
+
+    await expect(
+      createCosenseClient(TEST_PERSONAL_ACCESS_TOKEN, fetcher).appendToPage({
+        title: "Page",
+        text: " \n ",
+        expectedCommitId: "commit-before",
+      }),
+    ).rejects.toThrow("Must not be blank");
+
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("allows large append text without a local line or character cap", async () => {
+    const title = "Page";
+    const text = Array.from(
+      { length: 101 },
+      (_, index) => `${index}:${"a".repeat(100)}`,
+    ).join("\n");
+    const current = existingPage(title);
+    const existingLines = [
+      { id: "title-line", text: title },
+      { id: "body-line", text: "existing" },
+    ];
+    const { fetcher } = createWriteFixtureFetch(
+      { method: "GET", body: current },
+      {
+        method: "POST",
+        body: (call: FetchCall) =>
+          previewFromRequest(call, {
+            title,
+            persistent: true,
+            existingLines,
+          }),
+      },
+      { method: "GET", body: current },
+      {
+        method: "POST",
+        body: { commitId: "commit-after", page: { title } },
+      },
+    );
+
+    await expect(
+      createCosenseClient(TEST_PERSONAL_ACCESS_TOKEN, fetcher).appendToPage({
+        title,
+        text,
+        expectedCommitId: "commit-before",
+      }),
+    ).resolves.toMatchObject({
+      action: "append",
+      addedLines: 101,
     });
   });
 
@@ -1855,7 +2026,7 @@ describe("updatePage", () => {
     expect(calls).toHaveLength(4);
   });
 
-  it("rejects invalid input and updates requiring over 100 changes", async () => {
+  it("rejects missing update content and NUL without fetching", async () => {
     const fetcher: typeof fetch = vi.fn();
     const client = createCosenseClient(TEST_PERSONAL_ACCESS_TOKEN, fetcher);
 
@@ -1866,34 +2037,79 @@ describe("updatePage", () => {
       client.updatePage({
         title: "Page",
         expectedCommitId: "commit-before",
-        body: "x\n".repeat(100),
-      }),
-    ).rejects.toThrow();
-    await expect(
-      client.updatePage({
-        title: "Page",
-        expectedCommitId: "commit-before",
         body: "a\0b",
       }),
     ).rejects.toThrow("Must not contain NUL");
     expect(fetcher).not.toHaveBeenCalled();
+  });
 
-    const tooMany = editablePage(
+  it("submits an exact preview for an update requiring over 100 changes", async () => {
+    const current = editablePage(
       "Page",
-      Array.from({ length: 101 }, (_, index) => `line-${index}`),
+      Array.from({ length: 101 }, (_, index) => `old-${index}`),
     );
-    const bounded = createWriteFixtureFetch({ method: "GET", body: tooMany });
-    await expect(
-      createCosenseClient(
-        TEST_PERSONAL_ACCESS_TOKEN,
-        bounded.fetcher,
-      ).updatePage({
-        title: "Page",
-        expectedCommitId: "commit-before",
-        body: "",
-      }),
-    ).rejects.toThrow("must not require more than 100 changes");
-    expect(bounded.calls).toHaveLength(1);
+    const desiredBody = Array.from(
+      { length: 101 },
+      (_, index) => `new-${index}:${"x".repeat(100)}`,
+    );
+    const body = desiredBody.join("\n");
+    expect(body.length).toBeGreaterThan(10_000);
+
+    const { fetcher, calls } = createWriteFixtureFetch(
+      { method: "GET", body: current },
+      {
+        method: "POST",
+        body: (call: FetchCall) => {
+          expect(requestBody(call).changes).toHaveLength(101);
+          const preview = appliedPreviewFromRequest(call, current) as {
+            pagePreview: {
+              title: string;
+              persistent: boolean;
+              lines: { id: string; text: string }[];
+            };
+          };
+          expect(preview.pagePreview).toEqual({
+            title: "Page",
+            persistent: true,
+            lines: [
+              { id: "title-line", text: "Page" },
+              ...desiredBody.map((text, index) => ({
+                id: `body-${index}`,
+                text,
+              })),
+            ],
+          });
+          return preview;
+        },
+      },
+      { method: "GET", body: current },
+      {
+        method: "POST",
+        body: { commitId: "commit-after", page: { title: "Page" } },
+      },
+    );
+
+    const result = await createCosenseClient(
+      TEST_PERSONAL_ACCESS_TOKEN,
+      fetcher,
+    ).updatePage({
+      title: "Page",
+      expectedCommitId: "commit-before",
+      body,
+    });
+
+    expect(calls).toHaveLength(4);
+    expect(calls.map(({ init }) => init?.method)).toEqual([
+      "GET",
+      "POST",
+      "GET",
+      "POST",
+    ]);
+    expect(result).toMatchObject({
+      action: "update",
+      changed: true,
+      bodyChanged: true,
+    });
   });
 });
 
@@ -1926,6 +2142,20 @@ describe("replaceLinks", () => {
       toTitle: "new title",
       message: "replacement started",
     });
+  });
+
+  it("truncates an upstream message after a successful replacement", async () => {
+    const { fetcher } = createWriteFixtureFetch({
+      method: "POST",
+      body: { message: "x".repeat(2_100) },
+    });
+
+    const result = await createCosenseClient(
+      TEST_PERSONAL_ACCESS_TOKEN,
+      fetcher,
+    ).replaceLinks({ fromTitle: "old", toTitle: "new" });
+
+    expect(result.message).toBe("x".repeat(2_000));
   });
 
   it("rejects invalid or normalized-equal titles before fetching", async () => {
@@ -1998,7 +2228,6 @@ describe("replaceLinks", () => {
   it.each([
     ["network failure", { error: new TypeError("network failed") }],
     ["server failure", { status: 503, body: { secret: "not exposed" } }],
-    ["invalid success", { body: { message: "x".repeat(501) } }],
   ])("marks %s as retryable without retrying", async (_name, fixture) => {
     const { fetcher, calls } = createWriteFixtureFetch({
       method: "POST",
@@ -2243,11 +2472,11 @@ describe("write errors and limits", () => {
     const fetcher: typeof fetch = vi.fn();
     const client = createCosenseClient(TEST_PERSONAL_ACCESS_TOKEN, fetcher);
     const invalidCreateInputs = [
-      { title: "山形", text: " \n " },
       { title: "山形", text: "a\0b" },
-      { title: "山形", text: "日".repeat(10_001) },
-      { title: "山形", text: "x\n".repeat(100) },
       { title: "日".repeat(501), text: "本文" },
+      { title: " ", text: "本文" },
+      { title: ".", text: "本文" },
+      { title: "..", text: "本文" },
       { title: "山\n形", text: "本文" },
       { title: "山\r形", text: "本文" },
       { title: "山\0形", text: "本文" },
